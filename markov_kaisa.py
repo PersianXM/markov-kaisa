@@ -1544,13 +1544,130 @@ def print_summary(cfg: dict, decision: dict, dest: Path, index_path: Path) -> No
         print("\nOpen League and select Kai'Sa. The set appears under Item Sets.")
 
 
+LOLALYTICS_TIERS = (
+    "iron",
+    "bronze",
+    "silver",
+    "gold",
+    "platinum",
+    "emerald",
+    "diamond",
+    "master",
+    "grandmaster",
+    "challenger",
+    "platinum_plus",
+    "emerald_plus",
+    "diamond_plus",
+    "master_plus",
+    "all",
+)
+
+
+def prior_for_tier(tier: str) -> tuple[str, str]:
+    """Pair the chosen rank with a thicker nearby prior, not a fixed Silver setup."""
+    name = (tier or "silver").lower()
+    if name in {"iron", "bronze", "silver", "gold"}:
+        return "emerald", "all"
+    if name in {"platinum", "emerald", "platinum_plus"}:
+        return "diamond", "all"
+    if name in {"diamond", "emerald_plus", "diamond_plus"}:
+        return "master", "all"
+    return "all", "all"
+
+
+def pick_tier_menu(default: str = "silver", out_path: Path | None = None) -> str | None:
+    """Interactive up/down rank picker for the Windows launcher."""
+    tiers = list(LOLALYTICS_TIERS)
+    try:
+        idx = tiers.index(default.lower())
+    except ValueError:
+        idx = tiers.index("silver")
+
+    labels = {
+        "iron": "Iron",
+        "bronze": "Bronze",
+        "silver": "Silver  (default)",
+        "gold": "Gold",
+        "platinum": "Platinum",
+        "emerald": "Emerald",
+        "diamond": "Diamond",
+        "master": "Master",
+        "grandmaster": "Grandmaster",
+        "challenger": "Challenger",
+        "platinum_plus": "Platinum+",
+        "emerald_plus": "Emerald+",
+        "diamond_plus": "Diamond+",
+        "master_plus": "Master+",
+        "all": "All ranks",
+    }
+    header = "  Use Up / Down to choose rank, Enter to confirm, Esc to cancel"
+    menu_lines = 3 + len(tiers)
+    stream = sys.stdout
+
+    def draw() -> None:
+        stream.write(f"\n{header}\n\n")
+        for i, tier in enumerate(tiers):
+            name = labels.get(tier, tier)
+            if i == idx:
+                stream.write(f"  >  {name}\n")
+            else:
+                stream.write(f"     {name}\n")
+        stream.flush()
+
+    def commit(chosen: str | None) -> str | None:
+        if chosen and out_path is not None:
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            out_path.write_text(chosen + "\n", encoding="utf-8")
+        return chosen
+
+    if not sys.stdin.isatty():
+        print(default)
+        return commit(default)
+
+    try:
+        import msvcrt
+    except ImportError:
+        print(default)
+        return commit(default)
+
+    first = True
+    while True:
+        if not first:
+            stream.write(f"\033[{menu_lines}A")
+        first = False
+        draw()
+
+        key = msvcrt.getch()
+        if key in (b"\x00", b"\xe0"):
+            arrow = msvcrt.getch()
+            if arrow == b"H":
+                idx = (idx - 1) % len(tiers)
+            elif arrow == b"P":
+                idx = (idx + 1) % len(tiers)
+            continue
+        if key in (b"\r", b"\n"):
+            chosen = tiers[idx]
+            stream.write(f"\n  Selected: {labels.get(chosen, chosen)}\n")
+            stream.flush()
+            return commit(chosen)
+        if key == b"\x1b":
+            stream.write("\n  Cancelled.\n")
+            stream.flush()
+            return commit(None)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate the Markov Kai'Sa item set.")
     parser.add_argument(
         "--tier",
-        choices=("silver", "gold"),
+        choices=LOLALYTICS_TIERS,
         default=None,
-        help="Lolalytics rank filter. Default comes from config.json (silver).",
+        help="Lolalytics rank filter. Default comes from config.json.",
+    )
+    parser.add_argument(
+        "--pick-tier",
+        action="store_true",
+        help="Interactive up/down menu; writes the chosen tier for RUN.bat.",
     )
     return parser.parse_args()
 
@@ -1558,9 +1675,17 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     cfg = load_config()
     args = parse_args()
+    if args.pick_tier:
+        chosen = pick_tier_menu(
+            str(cfg.get("tier") or "silver"),
+            out_path=OUTPUT_DIR / "selected_rank.txt",
+        )
+        return 0 if chosen else 1
     if args.tier:
         cfg["tier"] = args.tier
         print(f"Rank override from launcher: {args.tier}")
+    cfg["prior_tier"], cfg["fallback_prior_region"] = prior_for_tier(cfg["tier"])
+    print(f"Prior for late items: {cfg['prior_tier']} / {cfg['fallback_prior_region']}")
     try:
         items = load_items()
         decision, silver, p0, p_avg, alpha = build_decision(cfg, items)

@@ -3,13 +3,7 @@ setlocal EnableExtensions
 title Markov KaiSa
 cd /d "%~dp0"
 
-rem ============================================================
-rem  RANK: silver  (default)    or    gold
-rem  Change the value below when you promote to Gold.
-rem ============================================================
-set "RANK=silver"
-
-mode con: cols=88 lines=32 >nul 2>nul
+mode con: cols=88 lines=36 >nul 2>nul
 color 0B
 
 for /f %%A in ('echo prompt $E^| cmd') do set "ESC=%%A"
@@ -22,33 +16,15 @@ set "GREEN=%ESC%[38;5;82m"
 set "RED=%ESC%[38;5;203m"
 set "WHITE=%ESC%[97m"
 
-if /i "%RANK%"=="gold" goto :rank_gold
-set "RANK=silver"
-set "RANK_LABEL=SILVER"
-goto :banner
-
-:rank_gold
-set "RANK=gold"
-set "RANK_LABEL=GOLD"
-
-:banner
 cls
 echo.
 echo %GOLD%  ========================================================================%RST%
 echo %GOLD%                                                                          %RST%
 echo %PINK%      M A R K O V      K A I ' S A%RST%
-echo %WHITE%              %RANK_LABEL%   EUW%RST%
+echo %WHITE%              pick your rank   EUW%RST%
 echo %DIM%         live patch  -  actually-built  -  U-max%RST%
 echo %GOLD%                                                                          %RST%
 echo %GOLD%  ========================================================================%RST%
-echo.
-echo %DIM%  ------------------------------------------------------------------------%RST%
-echo   %CYAN%-%RST%  %WHITE%Rank filter:%RST% %GOLD%%RANK%%RST%  %DIM%(edit RANK= at the top of this file)%RST%
-echo   %CYAN%-%RST%  %WHITE%Reading live Lolalytics data%RST%
-echo   %CYAN%-%RST%  %WHITE%Scoring builds with the Markov protocol%RST%
-echo   %CYAN%-%RST%  %WHITE%Validating yesterday's pick on today's data%RST%
-echo   %CYAN%-%RST%  %WHITE%Installing the item set into League%RST%
-echo %DIM%  ------------------------------------------------------------------------%RST%
 echo.
 
 set "PY="
@@ -67,6 +43,42 @@ pause >nul
 exit /b 1
 
 :have_py
+set "RANKFILE=%~dp0output\selected_rank.txt"
+if exist "%RANKFILE%" del "%RANKFILE%" >nul 2>nul
+%PY% markov_kaisa.py --pick-tier
+if errorlevel 1 (
+  echo   %DIM%Cancelled.%RST%
+  echo.
+  echo   %GOLD%Press any key to close...%RST%
+  pause >nul
+  exit /b 1
+)
+if not exist "%RANKFILE%" (
+  echo   %RED%[X]  Rank was not selected.%RST%
+  echo.
+  echo   %GOLD%Press any key to close...%RST%
+  pause >nul
+  exit /b 1
+)
+set /p RANK=<"%RANKFILE%"
+if not defined RANK (
+  echo   %RED%[X]  Rank was not selected.%RST%
+  echo.
+  echo   %GOLD%Press any key to close...%RST%
+  pause >nul
+  exit /b 1
+)
+
+echo.
+echo %DIM%  ------------------------------------------------------------------------%RST%
+echo   %CYAN%-%RST%  %WHITE%Rank filter:%RST% %GOLD%%RANK%%RST%
+echo   %CYAN%-%RST%  %WHITE%Reading live Lolalytics data%RST%
+echo   %CYAN%-%RST%  %WHITE%Scoring builds with the Markov protocol%RST%
+echo   %CYAN%-%RST%  %WHITE%Validating yesterday's pick on today's data%RST%
+echo   %CYAN%-%RST%  %WHITE%Installing the item set into League%RST%
+echo %DIM%  ------------------------------------------------------------------------%RST%
+echo.
+
 %PY% markov_kaisa.py --tier %RANK%
 set "ERR=%errorlevel%"
 echo.
