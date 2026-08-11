@@ -600,7 +600,7 @@ def choose_start_items(
     lam: float,
     n_min: float,
 ) -> tuple[list[str], dict | None]:
-    best_ids = ["1086", "2003"]
+    best_ids = ["1055", "2003"]
     best_score = None
     for ids, games, wr in parse_start_sets(html):
         wins = wr / 100.0 * games
@@ -609,7 +609,10 @@ def choose_start_items(
             continue
         if best_score is None or s["U"] > best_score["U"]:
             best_score = s
-            best_ids = ids
+            best_ids = list(ids)
+    potions = {"2003", "2010", "2031"}
+    if not any(item_id in potions for item_id in best_ids):
+        best_ids = [best_ids[0], "2003"]
     return best_ids, best_score
 
 
@@ -1319,15 +1322,6 @@ def build_decision(cfg: dict, items: dict[int, str]) -> tuple[dict, dict, float,
     skills = parse_skill_order(html, p0, p_avg, alpha, lam, cfg.get("n_min_start", 2000))
     runes = parse_runes(html)
     matchups = parse_hard_matchups(html)
-    if skills:
-        print(f"Skills: {skills['order']}  U={skills['U']*100:+.2f} n={skills['n']:.0f}")
-    if runes:
-        print(f"Runes: {runes['title']} | {runes['secondary']}")
-    if matchups:
-        print(
-            "Hard matchups: "
-            + ", ".join(f"{row['champion']} {row['wr']*100:.1f}%" for row in matchups)
-        )
 
     core_ids = selected_core.split("_")
     buy_order = [core_ids[0], boots, core_ids[1], core_ids[2], item4, item5, item6]
@@ -1405,10 +1399,6 @@ def make_itemset(cfg: dict, decision: dict) -> dict:
     start_ids = [row["id"] for row in decision["start"]]
     situ_ids = [row["id"] for row in decision["situational"]]
     policy = decision.get("policy") or {}
-    runes = decision.get("runes") or {}
-    skills = decision.get("skills") or {}
-    rune_title = "Runes: " + (runes.get("title") or "see console")
-    skill_title = "Skills: " + (skills.get("order") or "?")
     return {
         "title": cfg["build_title"],
         "type": "custom",
@@ -1422,13 +1412,11 @@ def make_itemset(cfg: dict, decision: dict) -> dict:
         "preferredItemSlots": [],
         "blocks": [
             block("Starting", start_ids),
-            block("6 Items + Boots", buy_ids),
-            block("Situational", situ_ids),
-            block("Vs Tanks", [row["id"] for row in policy.get("vs_tanks") or []]),
-            block("Vs Burst", [row["id"] for row in policy.get("vs_burst") or []]),
-            block("Vs AP", [row["id"] for row in policy.get("vs_ap") or []]),
-            block(skill_title, []),
-            block(rune_title, []),
+            block("Buy order (default)", buy_ids),
+            block("Late swaps (replace item 4-6)", situ_ids),
+            block("Vs tanks (replace late, not core)", [row["id"] for row in policy.get("vs_tanks") or []]),
+            block("Vs burst (replace late, not core)", [row["id"] for row in policy.get("vs_burst") or []]),
+            block("Vs AP (replace late, not core)", [row["id"] for row in policy.get("vs_ap") or []]),
             block("Wards", ["3340", "3364"]),
         ],
     }
@@ -1498,12 +1486,6 @@ def print_summary(cfg: dict, decision: dict, dest: Path, index_path: Path) -> No
         print(f"  alpha={ctx['alpha']:g}  lambda={ctx.get('lambda')}  {ctx.get('hyper', {}).get('status', '')}")
     print("=" * 64)
     print("Start  : " + ", ".join(row["name"] for row in decision.get("start") or []))
-    skills = decision.get("skills") or {}
-    runes = decision.get("runes") or {}
-    if skills.get("order"):
-        print(f"Skills : {skills['order']}")
-    if runes.get("title"):
-        print(f"Runes  : {runes['title']} | {runes.get('secondary', '')}")
     print(f"Item 1 : {decision['item1']['name']}")
     print(f"Boots  : {decision['boots']['name']}")
     print(f"Core   : {decision['core']['name']}")

@@ -41,5 +41,6 @@ Most Common extension instead of a hardcoded item.
 switch to holdout once a previous calendar day exists. A core that
 fades three days in a row is blacklisted for seven days.
 
-Skill order, rune page, hard matchups, and Vs Tanks / Burst / AP
-branches are written into the item set and `output/decision.json`.
+Vs Tanks / Burst / AP blocks are late-slot swaps only (items 4–6), not
+core replacements. Situational items are the same idea: optional
+replacements for the default late buy order.
