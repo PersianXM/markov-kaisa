@@ -8,7 +8,7 @@
   "prior_tier": "emerald",
   "prior_region": "euw",
   "fallback_prior_region": "all",
-  "patch": "16.15",
+  "patch": "auto",
   "queue": "ranked",
   "league_root": "G:\\Riot Games\\League of Legends",
   "itemset_dir": "G:\\Riot Games\\League of Legends\\Config\\Champions\\Kaisa\\Recommended",

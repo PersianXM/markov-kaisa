@@ -75,6 +75,43 @@ def is_boots(items: dict[int, str], item_id: str) -> bool:
     )
 
 
+def ddragon_patch() -> str:
+    versions = http_json(
+        "https://ddragon.leagueoflegends.com/api/versions.json",
+        timeout=DDRAGON_TIMEOUT,
+    )
+    return ".".join(str(versions[0]).split(".")[:2])
+
+
+def resolve_live_patch(cfg: dict) -> str:
+    """Read the patch Lolalytics is currently serving (not a hardcoded value)."""
+    configured = str(cfg.get("patch", "auto")).strip().lower()
+    if configured not in {"", "auto", "latest", "current"}:
+        print(f"Using configured patch {configured}")
+        return configured
+
+    url = (
+        f"https://lolalytics.com/lol/{cfg['champion']}/build/"
+        f"?tier={cfg['tier']}&region={cfg['region']}&lane={cfg['lane']}"
+    )
+    html = http_text(url)
+    match = re.search(
+        r'kaisa_[^"]*?_(\d+\.\d+)(?:_|")',
+        html,
+        re.I,
+    )
+    if not match:
+        match = re.search(r"Patch(?:</[^>]+>)?\s*(\d+\.\d+)", html, re.I)
+    if match:
+        patch = match.group(1)
+        print(f"Live patch from Lolalytics: {patch}")
+        return patch
+
+    patch = ddragon_patch()
+    print(f"Live patch from Data Dragon: {patch}")
+    return patch
+
+
 def fetch_itemsets(cfg: dict, tier: str, region: str) -> dict:
     url = (
         "https://a1.lolalytics.com/mega/?ep=build-itemset&v=1"
@@ -266,6 +303,7 @@ def choose_late_items(
 
 
 def build_decision(cfg: dict, items: dict[int, str]) -> dict:
+    cfg["patch"] = resolve_live_patch(cfg)
     print(f"Fetching Silver {cfg['region'].upper()} item sets...")
     silver = fetch_itemsets(cfg, cfg["tier"], cfg["region"])
     print(f"Fetching {cfg['prior_tier'].title()} {cfg['prior_region'].upper()} prior...")

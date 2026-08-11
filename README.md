@@ -5,6 +5,8 @@ Silver-EUW decision protocol, and installs the result into the League client.
 
 ## Run
 
+Project folder: `G:\Riot\markov-kaisa`
+
 Double-click `RUN.bat`, or press Enter after selecting it.
 
 The item set is written to:
