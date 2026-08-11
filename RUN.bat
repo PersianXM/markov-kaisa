@@ -3,28 +3,28 @@ setlocal EnableExtensions
 title Markov KaiSa
 cd /d "%~dp0"
 
-mode con: cols=88 lines=36 >nul 2>nul
-color 0B
+mode con: cols=88 lines=42 >nul 2>nul
+color 0F
 
 for /f %%A in ('echo prompt $E^| cmd') do set "ESC=%%A"
 set "RST=%ESC%[0m"
-set "DIM=%ESC%[38;5;245m"
-set "GOLD=%ESC%[38;5;220m"
-set "CYAN=%ESC%[38;5;51m"
-set "PINK=%ESC%[38;5;213m"
-set "GREEN=%ESC%[38;5;82m"
-set "RED=%ESC%[38;5;203m"
-set "WHITE=%ESC%[97m"
+set "CB=%ESC%[48;2;232;90;60m"
+set "IB=%ESC%[48;2;26;26;26m"
+set "TB=%ESC%[48;2;44;74;74m"
+set "SB=%ESC%[48;2;217;211;199m"
+set "CT=%ESC%[38;2;232;90;60m"
+set "WT=%ESC%[38;2;246;241;231m"
+set "DT=%ESC%[38;2;120;112;100m"
+set "OK=%ESC%[38;2;44;74;74m"
+set "ER=%ESC%[38;2;176;58;38m"
 
 cls
 echo.
-echo %GOLD%  ========================================================================%RST%
-echo %GOLD%                                                                          %RST%
-echo %PINK%      M A R K O V      K A I ' S A%RST%
-echo %WHITE%              pick your rank   EUW%RST%
-echo %DIM%         live patch  -  actually-built  -  U-max%RST%
-echo %GOLD%                                                                          %RST%
-echo %GOLD%  ========================================================================%RST%
+echo   %CB%  %RST% %IB%  %RST% %CB%  %RST% %CB%  %RST% %TB%  %RST% %TB%  %RST% %IB%  %RST%
+echo.
+echo   %CT%MARKOV KAISA%RST%
+echo   %WT%live data   U-max   any rank%RST%
+echo   %DT%# # #     # #%RST%
 echo.
 
 set "PY="
@@ -35,10 +35,10 @@ where python >nul 2>nul
 if %errorlevel%==0 set "PY=python"
 if defined PY goto :have_py
 
-echo   %RED%[X]  Python was not found.%RST%
-echo   %DIM%     Install Python 3 and run this file again.%RST%
+echo   %ER%[X]  Python was not found.%RST%
+echo   %DT%     Install Python 3 and run this file again.%RST%
 echo.
-echo   %GOLD%Press any key to close...%RST%
+echo   %CT%Press any key to close...%RST%
 pause >nul
 exit /b 1
 
@@ -46,37 +46,35 @@ exit /b 1
 set "RANKFILE=%~dp0output\selected_rank.txt"
 if exist "%RANKFILE%" del "%RANKFILE%" >nul 2>nul
 %PY% markov_kaisa.py --pick-tier
-if errorlevel 1 (
-  echo   %DIM%Cancelled.%RST%
-  echo.
-  echo   %GOLD%Press any key to close...%RST%
-  pause >nul
-  exit /b 1
-)
-if not exist "%RANKFILE%" (
-  echo   %RED%[X]  Rank was not selected.%RST%
-  echo.
-  echo   %GOLD%Press any key to close...%RST%
-  pause >nul
-  exit /b 1
-)
+if errorlevel 1 goto :cancelled
+if not exist "%RANKFILE%" goto :no_rank
 set /p RANK=<"%RANKFILE%"
-if not defined RANK (
-  echo   %RED%[X]  Rank was not selected.%RST%
-  echo.
-  echo   %GOLD%Press any key to close...%RST%
-  pause >nul
-  exit /b 1
-)
+if not defined RANK goto :no_rank
+goto :run_build
 
+:cancelled
+echo   %DT%Cancelled.%RST%
 echo.
-echo %DIM%  ------------------------------------------------------------------------%RST%
-echo   %CYAN%-%RST%  %WHITE%Rank filter:%RST% %GOLD%%RANK%%RST%
-echo   %CYAN%-%RST%  %WHITE%Reading live Lolalytics data%RST%
-echo   %CYAN%-%RST%  %WHITE%Scoring builds with the Markov protocol%RST%
-echo   %CYAN%-%RST%  %WHITE%Validating yesterday's pick on today's data%RST%
-echo   %CYAN%-%RST%  %WHITE%Installing the item set into League%RST%
-echo %DIM%  ------------------------------------------------------------------------%RST%
+echo   %CT%Press any key to close...%RST%
+pause >nul
+exit /b 1
+
+:no_rank
+echo   %ER%[X]  Rank was not selected.%RST%
+echo.
+echo   %CT%Press any key to close...%RST%
+pause >nul
+exit /b 1
+
+:run_build
+echo.
+echo   %DT%# # #     # #%RST%
+echo   %CB% %RST%  %WT%RANK%RST%        %CT%%RANK%%RST%
+echo   %IB% %RST%  %WT%FETCH%RST%       live Lolalytics
+echo   %CB% %RST%  %WT%SCORE%RST%       Markov U protocol
+echo   %TB% %RST%  %WT%CHECK%RST%       yesterday on today
+echo   %IB% %RST%  %WT%INSTALL%RST%     League item set
+echo   %DT%#     # # #%RST%
 echo.
 
 %PY% markov_kaisa.py --tier %RANK%
@@ -84,20 +82,17 @@ set "ERR=%errorlevel%"
 echo.
 
 if not "%ERR%"=="0" goto :fail
-echo %GREEN%  ========================================================================%RST%
-echo %GREEN%   [OK]  Markov KaiSa is ready in the League client.%RST%
-echo %GREEN%  ========================================================================%RST%
-echo   %DIM%Open League and select KaiSa to use the item set.%RST%
+echo   %CB%  %RST% %CB%  %RST% %CB%  %RST%
+echo   %OK%[OK]%RST%  %WT%Markov KaiSa is in the League client.%RST%
+echo   %DT%Close League fully, reopen, select KaiSa, open Item Sets.%RST%
 goto :done
 
 :fail
-echo %RED%  ========================================================================%RST%
-echo %RED%   [X]  Build failed. Check the message above.%RST%
-echo %RED%  ========================================================================%RST%
+echo   %IB%  %RST% %ER%[X]%RST%  Build failed. Check the message above.
 
 :done
 echo.
-echo   %GOLD%Press any key to close...%RST%
+echo   %CT%Press any key to close...%RST%
 pause >nul
 endlocal
 exit /b %ERR%

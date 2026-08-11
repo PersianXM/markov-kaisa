@@ -1600,18 +1600,25 @@ def pick_tier_menu(default: str = "silver", out_path: Path | None = None) -> str
         "master_plus": "Master+",
         "all": "All ranks",
     }
-    header = "  Use Up / Down to choose rank, Enter to confirm, Esc to cancel"
-    menu_lines = 3 + len(tiers)
+    coral_bg = "\033[48;2;232;90;60m"
+    ink = "\033[38;2;26;26;26m"
+    cream = "\033[38;2;246;241;231m"
+    coral = "\033[38;2;232;90;60m"
+    dim = "\033[38;2;120;112;100m"
+    reset = "\033[0m"
+    header = "  Up / Down  =  move     Enter  =  pick     Esc  =  cancel"
+    menu_lines = 4 + len(tiers)
     stream = sys.stdout
 
     def draw() -> None:
-        stream.write(f"\n{header}\n\n")
+        stream.write(f"\n{coral}  pick a rank brick{reset}\n")
+        stream.write(f"{dim}{header}{reset}\n\n")
         for i, tier in enumerate(tiers):
-            name = labels.get(tier, tier)
+            name = f"{labels.get(tier, tier):<22}"
             if i == idx:
-                stream.write(f"  >  {name}\n")
+                stream.write(f"  {coral_bg}{ink}  #  {name}{reset}\n")
             else:
-                stream.write(f"     {name}\n")
+                stream.write(f"  {dim}  .  {name}{reset}\n")
         stream.flush()
 
     def commit(chosen: str | None) -> str | None:
@@ -1647,7 +1654,7 @@ def pick_tier_menu(default: str = "silver", out_path: Path | None = None) -> str
             continue
         if key in (b"\r", b"\n"):
             chosen = tiers[idx]
-            stream.write(f"\n  Selected: {labels.get(chosen, chosen)}\n")
+            stream.write(f"\n  {coral}#{reset}  selected  {labels.get(chosen, chosen)}\n")
             stream.flush()
             return commit(chosen)
         if key == b"\x1b":
