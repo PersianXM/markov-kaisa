@@ -9,7 +9,7 @@
 [![Patch](https://img.shields.io/badge/patch-live%20from%20Lolalytics-ff4ecd?style=for-the-badge&labelColor=14081f)](https://lolalytics.com/lol/kaisa/build/)
 [![License](https://img.shields.io/badge/code-one%20click-f5c542?style=for-the-badge&labelColor=14081f)](RUN.bat)
 
-**یک کلیک → دادهٔ زندهٔ Lolalytics → بیشینه‌سازی $U$ → نصب آیتم‌ست در کلاینت**
+**One click → live Lolalytics → maximize $U$ → install the League item set**
 
 <img src="docs/assets/pipeline.svg" alt="pipeline" width="100%"/>
 
@@ -17,27 +17,27 @@
 
 ---
 
-## این برنامه چه می‌کند؟
+## What this does
 
-`RUN.bat` پچ زنده را از Lolalytics می‌خواند، مسیرهای **Actually-Built** را برای Kai'Sa در Silver EUW امتیاز می‌دهد، و یک آیتم‌ست ۷ اسلاته (۶ لجندری + بوت) به نام **Markov Kai'Sa** داخل کلاینت می‌نویسد.
+`RUN.bat` reads the live patch from Lolalytics, scores **Actually-Built** Kai'Sa paths for Silver EUW, and installs a 7-slot item set (6 legendaries + boots) named **Markov Kai'Sa** into the League client.
 
-رتب پیش‌فرض **silver** است. بعد از پروموت، در `RUN.bat` بنویسید `set RANK=gold`.
+Default rank is **silver**. After you promote, set `RANK=gold` at the top of `RUN.bat`.
 
 ```text
 G:\Riot Games\League of Legends\Config\ItemSets.json
 ```
 
-کلاینت را کامل ببندید و دوباره باز کنید تا ست دیده شود.
+Fully close and reopen the League client so the set appears.
 
 ---
 
-## فرمول اصلی
+## Core formula
 
 <div align="center">
 <img src="docs/assets/formula-u.svg" alt="U = (p̃ − p_avg) − λ · CI95" width="90%"/>
 </div>
 
-برنامه **وین‌ریت خام را بیشینه نمی‌کند**. وین‌ریت خام مسیرهای کمیاب و مسیرهایی که فقط وقتی جلو هستید کامل می‌شوند را باد می‌کند. به‌جای آن این زنجیره را حل می‌کند:
+The program does **not** maximize raw winrate. Raw WR inflates rare paths and paths that only finish when you are already winning. Instead it solves:
 
 $$
 \hat p = \frac{W}{n}
@@ -53,28 +53,24 @@ $$
 U = \Delta - \lambda\cdot\mathrm{CI}_{95}
 $$
 
-| نماد | معنی | پیش‌فرض |
+| Symbol | Meaning | Default |
 | :---: | :--- | :---: |
-| $W,\,n$ | برد و بازی‌های Actually-Built آن مسیر | از API |
-| $p_0$ | وین‌ریت قهرمان در همان رنک/سرور | زنده |
-| $p_{\mathrm{avg}}$ | خط مبنا (معمولاً $0.50$) | زنده |
-| $\alpha$ | شدت جمع‌شدن Empirical Bayes | $800$ |
-| $\lambda$ | جریمهٔ عدم‌قطعیت | $0.55$ |
-| $U$ | مطلوبیت نهایی مسیر | $\arg\max$ |
+| $W,\,n$ | Wins and games for that Actually-Built path | live API |
+| $p_0$ | Champion winrate for the same rank/region | live |
+| $p_{\mathrm{avg}}$ | Baseline (usually $0.50$) | live |
+| $\alpha$ | Empirical Bayes shrinkage strength | $800$ |
+| $\lambda$ | Uncertainty penalty | $0.55$ |
+| $U$ | Path utility | $\arg\max$ |
 
-<div dir="rtl">
-
-- $\tilde p$ وین‌ریت را به سمت $p_0$ می‌کشد: مسیر $n=200$ با WR دروغین ۵۸٪ دیگر قهرمان جدول نمی‌شود.
-- $\Delta$ از WR خام مهم‌تر است: ۵۲٪ روی قهرمانی که ۴۷٫۵٪ است بهتر از ۵۱٪ روی قهرمان ۵۱٪ است.
-- $\lambda\cdot\mathrm{CI}$ مسیر کم‌نمونه را جریمه می‌کند. اگر $n < n_{\min}$ باشد، $U$ اصلاً تعریف نمی‌شود و مسیر حذف می‌شود.
-
-</div>
+- $\tilde p$ pulls noisy WR toward $p_0$: a path with $n=200$ and fake 58% WR does not win the table.
+- $\Delta$ matters more than raw WR: 52% on a 47.5% champion beats 51% on a 51% champion.
+- $\lambda\cdot\mathrm{CI}$ penalizes thin samples. If $n < n_{\min}$, $U$ is undefined and the path is rejected.
 
 ---
 
-## منطق مارکوف مرحله‌ای
+## Stagewise Markov logic
 
-بیلد یک تصمیم یک‌جا نیست. هر خرید، شرطی روی خریدهای قبلی است:
+A build is not one global choice. Each purchase is conditional on what you already bought:
 
 $$
 \pi^\star
@@ -84,7 +80,7 @@ $$
 U\!\left(i_t \mid i_1,\ldots,i_{t-1}\right)
 $$
 
-یعنی Item 2 فقط بین فرزندهای Item 1 انتخاب می‌شود، Item 3 فقط بین فرزندهای همان جفت، و الی آخر.
+Item 2 is chosen only among children of Item 1; Item 3 only among children of that pair; and so on.
 
 ```mermaid
 %%{init: {
@@ -109,22 +105,18 @@ flowchart LR
   E --> G
 ```
 
-<div dir="rtl">
-
-این یک زنجیرهٔ مارکوف **تصمیم** است، نه ادعای اینکه بازی واقعاً مارکوف است. حالت = آیتم‌های خریده‌شده. عمل = آیتم بعدی. پاداش ≈ $U$ شرطی.
-
-</div>
+This is a Markov **decision** chain, not a claim that the game itself is Markov. State = items owned. Action = next item. Reward ≈ conditional $U$.
 
 ---
 
-## Actually-Built، نه Exact
+## Actually-Built, not Exact
 
-Lolalytics دو جدول دارد:
+Lolalytics exposes two tables:
 
-| جدول | چه می‌شمارد | مشکل |
+| Table | Counts | Problem |
 | :---: | :--- | :--- |
-| Exact | فقط بازی‌هایی که دقیقاً همان $t$ آیتم را تمام کرده‌اند | بازیکن بازنده FF می‌کند → WR مصنوعی پایین |
-| **Actually-Built** | هر بازی که آن پیشوند را ساخته، حتی اگر بعداً آیتم بیشتری خریده | همان چیزی که برنامه جمع می‌زند |
+| Exact | Only games that finished at exactly those $t$ items | Losers FF early → artificially low WR |
+| **Actually-Built** | Every game that built that prefix, even if more items followed | What this program aggregates |
 
 $$
 n_t(i_1,\ldots,i_t)
@@ -133,13 +125,13 @@ n_t(i_1,\ldots,i_t)
 n^{\mathrm{exact}}_k(i_1,\ldots,i_t,\,\cdot)
 $$
 
-پس Statikk→Rageblade بازی‌هایی را هم شامل می‌شود که بعداً Nashor یا Dusk گرفته‌اند.
+So Statikk→Rageblade also includes games that later bought Nashor or Dusk.
 
 ---
 
-## هسته + جستجوی مشترک late
+## Core + joint late search
 
-Core سه‌آیتمه با $U$ رتبه‌بندی می‌شود. بعد به‌جای قفل کردن یک core و حرص late، $K=3$ هستهٔ برتر با بوت و آیتم ۴–۶ با هم امتیاز می‌گیرند:
+The 3-item core is ranked by $U$. Instead of locking one core and greedily finishing, the top $K=3$ cores are scored together with boots and items 4–6:
 
 $$
 U_{45}=U(i_4,i_5\mid \mathrm{core})
@@ -161,15 +153,15 @@ U_{\mathrm{total}}
 0.45\,U_{\mathrm{joint}}
 $$
 
-آیتم ۶ در API معمولاً `itemSet6` ندارد؛ از حضور late روی تکمیل‌های ۵آیتمه به‌عنوان پروکسی استفاده می‌شود.
+Item 6 usually has no `itemSet6` in the API; it is chosen from late presence on 5-item completions.
 
-اگر هیچ مسیری از کف $n$ رد نشود، **پرتکرارترین فرزند** گرفته می‌شود، نه یک آیتم هاردکد.
+If no path clears the $n$ floor, the program uses the **most common** child, not a hardcoded item.
 
 ---
 
-## پرایور سلسله‌مراتبی برای آیتم دیر
+## Hierarchical prior for late items
 
-نمونهٔ Silver برای آیتم ۴–۶ نازک است. وین‌ریت shrunk با پرایور Emerald EUW مخلوط می‌شود:
+Silver samples for items 4–6 are thin. The shrunk rate is mixed with an Emerald EUW prior:
 
 $$
 \tilde p_{\mathrm{hier}}
@@ -185,26 +177,26 @@ $$
 \begin{cases}
 400 & n_{\mathrm{S}}\ge 800 \\
 800 & n_{\mathrm{S}}\ge 200 \\
-1200 & \text{وگرنه}
+1200 & \text{otherwise}
 \end{cases}
 \right)
 $$
 
-هرچه Silver کم‌نمونه باشد، Emerald بیشتر حرف می‌زند. KR پرایور Silver EUW نیست.
+Thinner Silver samples lean harder on Emerald. KR is not the prior for Silver EUW.
 
 ---
 
-## کف نمونه و سهم پیک
+## Sample floors and pick share
 
-مسیر فقط وقتی وارد رقابت می‌شود که:
+A path only competes when:
 
 $$
 n \ge n_{\min}(t)
-\qquad\text{و}\qquad
+\qquad\text{and}\qquad
 \frac{n}{N_{\mathrm{champ}}} \ge s(t)
 $$
 
-| مرحله | $n_{\min}$ | سهم پیک |
+| Stage | $n_{\min}$ | Pick share |
 | :---: | :---: | :---: |
 | Start | 2000 | — |
 | Item 1 | 1500 | 3% |
@@ -212,74 +204,70 @@ $$
 | Core | 800 | 1% |
 | Item 4 / 5 / 6 | 800 / 400 / 250 | — |
 
-این کنترل مخدوش‌کنندهٔ عملی است، نه علیت کامل: مسیرهای کمیابِ «خوش‌شانس» حذف می‌شوند.
+This is practical confounding control, not full causality: lucky rare paths are dropped.
 
 ---
 
-## تنظیم $\alpha$ و $\lambda$
+## Tuning $\alpha$ and $\lambda$
 
-گرید:
+Grid:
 
 $$
 (\alpha,\lambda)\in
 \{400,800,1600\}\times\{0.30,0.55,0.80\}
-\quad\text{(سلول‌های استفاده‌شده در کد)}
+\quad\text{(cells used in code)}
 $$
 
-- **روز اول:** هسته‌ای که بیشترین سلول گرید روی آن توافق دارند (`grid_consensus`)
-- **از فردا:** همان سلول‌ها روی دادهٔ امروز holdout می‌شوند؛ $(\alpha,\lambda)$ با بیشترین $U$ امروز می‌ماند
+- **Day one:** modal core across the grid (`grid_consensus`)
+- **From day two:** yesterday's cells are held out on today's data; keep the $(\alpha,\lambda)$ with the best today-$U$
 
-اگر یک core سه روز پشت‌سرهم `faded` شود ($\Delta U \le -0.01$)، هفت روز بلاک می‌شود.
+If a core is `faded` three days in a row ($\Delta U \le -0.01$), it is blacklisted for seven days.
 
 ---
 
-## آیتم‌ست داخل کلاینت چه معنایی دارد؟
+## What the client item set means
 
-| بلوک | نقش |
+| Block | Role |
 | :--- | :--- |
 | **Starting** | Doran's Blade + Potion |
-| **Buy order** | پیش‌فرض ۷ اسلات |
-| **Late swaps** | جایگزین آیتم ۴–۶ / اسلات ۷ |
-| **Vs tanks / burst / AP** | فقط جایگزین late، **نه core** |
-| **Wards** | کنترل و سوئیپر |
+| **Buy order** | Default 7-slot path |
+| **Late swaps** | Replacements for items 4–6 / slot 7 |
+| **Vs tanks / burst / AP** | Late replacements only, **not core** |
+| **Wards** | Control ward and sweeper |
 
-Statikk → Rageblade → Nashor را عوض نکنید. LDR یا GA به‌جای Rabadon / Dusk / Zhonya می‌آیند، نه به‌جای هسته.
+Do not replace Statikk → Rageblade → Nashor. LDR or GA replace Rabadon / Dusk / Zhonya, not the core.
 
 ---
 
-## اجرا
+## Run
 
-پیش‌نیاز: Python 3.
+Requires Python 3.
 
 ```bat
 RUN.bat
 ```
 
-یا:
+Or:
 
 ```bash
 python markov_kaisa.py --tier silver
 ```
 
-خروجی‌ها:
+Outputs:
 
-| مسیر | محتوا |
+| Path | Contents |
 | :--- | :--- |
-| `output/decision.json` | امتیازها، $U$، گرید |
-| `history/daily.jsonl` | اعتبارسنجی روز بعد |
-| `Config\ItemSets.json` | ست داخل کلاینت |
+| `output/decision.json` | Scores, $U$, hyperparameter grid |
+| `history/daily.jsonl` | Next-day validation snapshots |
+| `Config\ItemSets.json` | Client item set |
 
 ---
 
-## چیزی که این روش نیست
+## What this method is not
 
-<div dir="rtl">
+This is an **under-model estimator**, not a causal proof of the “best build in the world.”
 
-این یک **تخمین‌گر تحت‌مدل** است، نه اثبات علّی «بهترین بیلد جهان».
-
-۵۳٪ بعد از کامل شدن core یعنی «اگر تا آیتم سوم رسیده‌اید»، نه شانس ورود به بازی. برای بازیکن متوسط Silver EUW در یک بازی منصفانه، بیلد خوب قهرمان را نزدیک خط تساوی می‌آورد؛ فاصلهٔ ۴۷٫۶٪ → ۵۳٪ بیشتر انتخاب نمونه است تا جادوی آیتم.
-
-</div>
+53% after completing the core means “given you reached item three,” not your chance when you enter the game. For an average Silver EUW player in a fair lobby, a good build moves the champion toward even; most of the 47.6% → 53% jump is selection bias, not item magic.
 
 ---
 
