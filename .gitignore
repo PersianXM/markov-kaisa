@@ -1,4 +1,6 @@
 output/
+history/*.jsonl
+history/*.json
 __pycache__/
 *.pyc
 .venv/

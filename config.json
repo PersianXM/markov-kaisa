@@ -16,8 +16,18 @@
   "itemsets_index": "G:\\Riot Games\\League of Legends\\Config\\ItemSets.json",
   "associated_maps": [11, 12],
   "alpha_rank": 800,
+  "lambda_risk": 0.55,
+  "n_min_start": 2000,
   "n_min_item1": 1500,
   "n_min_item2": 1200,
   "n_min_core": 800,
-  "n_min_late": 150
+  "n_min_item4": 800,
+  "n_min_item5": 400,
+  "n_min_item6": 250,
+  "min_pick_share_item1": 0.03,
+  "min_pick_share_pair": 0.015,
+  "min_pick_share_core": 0.01,
+  "core_search_k": 3,
+  "fade_blacklist_streak": 3,
+  "fade_blacklist_days": 7
 }
