@@ -392,11 +392,8 @@ def make_itemset(cfg: dict, decision: dict) -> dict:
     def block(title: str, ids: list[str]) -> dict:
         return {
             "type": title,
-            "recMath": False,
-            "minSummonerLevel": -1,
-            "maxSummonerLevel": -1,
-            "showIfSummonerSpell": "",
             "hideIfSummonerSpell": "",
+            "showIfSummonerSpell": "",
             "items": [{"id": item_id, "count": 1} for item_id in ids],
         }
 
@@ -406,12 +403,11 @@ def make_itemset(cfg: dict, decision: dict) -> dict:
     return {
         "title": cfg["build_title"],
         "type": "custom",
-        "map": "SR",
+        "map": "any",
         "mode": "any",
-        "priority": False,
-        "sortrank": 1,
+        "sortrank": 0,
         "startedFrom": "blank",
-        "uid": str(uuid.uuid4()),
+        "uid": str(uuid.uuid5(uuid.NAMESPACE_URL, "markov-kaisa-itemset")),
         "associatedChampions": [cfg["champion_id"]],
         "associatedMaps": cfg["associated_maps"],
         "preferredItemSlots": [],
@@ -424,20 +420,61 @@ def make_itemset(cfg: dict, decision: dict) -> dict:
     }
 
 
+def league_client_running() -> bool:
+    try:
+        import subprocess
+
+        result = subprocess.run(
+            ["tasklist", "/FI", "IMAGENAME eq LeagueClient.exe"],
+            capture_output=True,
+            text=True,
+            timeout=8,
+        )
+        return "LeagueClient.exe" in (result.stdout or "")
+    except Exception:
+        return False
+
+
+def upsert_client_index(cfg: dict, itemset: dict) -> Path:
+    index_path = Path(cfg["itemsets_index"])
+    if index_path.exists():
+        backup = index_path.with_suffix(".json.bak")
+        backup.write_bytes(index_path.read_bytes())
+        data = json.loads(index_path.read_text(encoding="utf-8"))
+    else:
+        data = {"accountId": 0, "itemSets": [], "timestamp": 0}
+
+    sets = list(data.get("itemSets") or [])
+    replaced = False
+    for i, existing in enumerate(sets):
+        if existing.get("uid") == itemset["uid"] or existing.get("title") == itemset["title"]:
+            sets[i] = itemset
+            replaced = True
+            break
+    if not replaced:
+        sets.append(itemset)
+
+    data["itemSets"] = sets
+    data["timestamp"] = int(datetime.now(timezone.utc).timestamp() * 1000)
+    index_path.write_text(json.dumps(data, separators=(",", ":"), ensure_ascii=False), encoding="utf-8")
+    return index_path
+
+
 def write_json(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
-def install_itemset(cfg: dict, itemset: dict) -> Path:
+def install_itemset(cfg: dict, itemset: dict) -> tuple[Path, Path]:
     dest_dir = Path(cfg["itemset_dir"])
     dest_dir.mkdir(parents=True, exist_ok=True)
     dest = dest_dir / cfg["itemset_filename"]
-    write_json(dest, itemset)
-    return dest
+    dest.write_text(json.dumps(itemset, separators=(",", ":"), ensure_ascii=False), encoding="utf-8")
+    index_path = upsert_client_index(cfg, itemset)
+    return dest, index_path
 
 
-def print_summary(cfg: dict, decision: dict, dest: Path) -> None:
+def print_summary(cfg: dict, decision: dict, dest: Path, index_path: Path) -> None:
     print()
     print("=" * 64)
     print(f"  {cfg['build_title']}")
@@ -453,8 +490,13 @@ def print_summary(cfg: dict, decision: dict, dest: Path) -> None:
     print("Buy order:")
     for i, row in enumerate(decision["buy_order"], 1):
         print(f"  {i}. {row['name']}")
-    print(f"\nInstalled:\n  {dest}")
-    print("Open the League client and pick Kai'Sa to see the item set.")
+    print(f"\nChampion file:\n  {dest}")
+    print(f"Client index:\n  {index_path}")
+    if league_client_running():
+        print("\nLeague is open. Close the client completely, then reopen it.")
+        print("Otherwise the client may overwrite ItemSets.json on exit.")
+    else:
+        print("\nOpen League and select Kai'Sa. The set appears under Item Sets.")
 
 
 def main() -> int:
@@ -466,8 +508,8 @@ def main() -> int:
         OUTPUT_DIR.mkdir(exist_ok=True)
         write_json(OUTPUT_DIR / "decision.json", decision)
         write_json(OUTPUT_DIR / cfg["itemset_filename"], itemset)
-        dest = install_itemset(cfg, itemset)
-        print_summary(cfg, decision, dest)
+        dest, index_path = install_itemset(cfg, itemset)
+        print_summary(cfg, decision, dest, index_path)
         return 0
     except Exception as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
