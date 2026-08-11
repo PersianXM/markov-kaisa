@@ -1,0 +1,22 @@
+{
+  "build_title": "Markov Kai'Sa",
+  "champion": "kaisa",
+  "champion_id": 145,
+  "lane": "bottom",
+  "tier": "silver",
+  "region": "euw",
+  "prior_tier": "emerald",
+  "prior_region": "euw",
+  "fallback_prior_region": "all",
+  "patch": "16.15",
+  "queue": "ranked",
+  "league_root": "G:\\Riot Games\\League of Legends",
+  "itemset_dir": "G:\\Riot Games\\League of Legends\\Config\\Champions\\Kaisa\\Recommended",
+  "itemset_filename": "MarkovKaisa.json",
+  "associated_maps": [11, 12],
+  "alpha_rank": 800,
+  "n_min_item1": 1500,
+  "n_min_item2": 1200,
+  "n_min_core": 800,
+  "n_min_late": 150
+}
