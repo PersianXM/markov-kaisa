@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="docs/assets/banner.svg" alt="Markov Kai'Sa" width="100%"/>
+<img src="docs/assets/banner.png" alt="Markov Kai'Sa" width="100%"/>
 
 <br/>
 
@@ -11,7 +11,7 @@
 
 **One click → live Lolalytics → maximize $U$ → install the League item set**
 
-<img src="docs/assets/pipeline.svg" alt="pipeline" width="100%"/>
+<img src="docs/assets/pipeline.png" alt="pipeline" width="100%"/>
 
 </div>
 
@@ -34,7 +34,7 @@ Fully close and reopen the League client so the set appears.
 ## Core formula
 
 <div align="center">
-<img src="docs/assets/formula-u.svg" alt="U = (p̃ − p_avg) − λ · CI95" width="90%"/>
+<img src="docs/assets/formula-u.png" alt="U = (p-tilde - p_avg) - lambda * CI95" width="90%"/>
 </div>
 
 The program does **not** maximize raw winrate. Raw WR inflates rare paths and paths that only finish when you are already winning. Instead it solves:
