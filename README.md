@@ -150,7 +150,7 @@ Edit `config.json` for paths and floors. Rank does **not** belong there for dail
 | :--- | :--- |
 | `alpha_rank` | Empirical Bayes strength (default `800`) |
 | `lambda_risk` | CI penalty (default `0.55`) |
-| `n_min_*` | Hard sample floors by stage |
+| `n_min_*` | Hard sample floors by stage. On a fresh patch these shrink with sample size. |
 | `min_pick_share_*` | Drop rare paths |
 | `core_search_k` | How many cores enter joint search |
 | `league_root` | League install |

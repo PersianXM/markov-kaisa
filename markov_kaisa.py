@@ -244,6 +244,34 @@ def apply_share_floor(
     return kept if kept else rows
 
 
+def scale_sample_floors(cfg: dict, total_n: float) -> tuple[dict, dict]:
+    """Shrink n_min when the live patch sample is still thin."""
+    specs = (
+        ("n_min_start", 0.04, 25.0),
+        ("n_min_item1", 0.03, 20.0),
+        ("n_min_item2", 0.015, 15.0),
+        ("n_min_core", 0.01, 10.0),
+        ("n_min_item4", 0.008, 8.0),
+        ("n_min_item5", 0.005, 6.0),
+        ("n_min_item6", 0.004, 5.0),
+        ("n_min_boots", 0.01, 10.0),
+    )
+    out = dict(cfg)
+    if "n_min_boots" not in out:
+        out["n_min_boots"] = 800.0
+    scaled: dict[str, tuple[float, float]] = {}
+    for key, share, abs_min in specs:
+        configured = float(out.get(key, abs_min))
+        if total_n <= 0:
+            effective = abs_min
+        else:
+            effective = max(abs_min, min(configured, math.ceil(share * total_n)))
+        out[key] = effective
+        if effective < configured:
+            scaled[key] = (configured, effective)
+    return out, scaled
+
+
 def most_common_extension(
     agg: dict,
     prefix: str,
@@ -797,7 +825,9 @@ def joint_finish(
     lam: float,
     cfg: dict,
 ) -> dict:
-    boots = list_boot_candidates(items, silver, pair, p0, p_avg, alpha, lam, 800, 4)
+    boots = list_boot_candidates(
+        items, silver, pair, p0, p_avg, alpha, lam, float(cfg.get("n_min_boots", 800)), 4
+    )
     if not boots:
         boots = [
             most_common_extension(actually_built(silver, 3, boot=True), pair)
@@ -1210,21 +1240,41 @@ def build_decision(cfg: dict, items: dict[int, str]) -> tuple[dict, dict, float,
     p0, p_avg = fetch_baseline(cfg)
     today = date.today().isoformat()
     history = load_history()
+    total_n = champion_sample_n(silver)
+    cfg, scaled_floors = scale_sample_floors(cfg, total_n)
+    if scaled_floors:
+        print(f"Early patch sample n={total_n:.0f}. Scaled n floors:")
+        for key, (old, new) in scaled_floors.items():
+            print(f"  {key}: {old:g} -> {new:g}")
     grid = compute_hyper_grid(silver, p0, p_avg, cfg)
     alpha, lam, hyper = select_hyperparams(history, today, silver, p0, p_avg, cfg, grid)
     print(
         f"Baseline p0={p0:.4f}  p_avg={p_avg:.4f}  "
         f"alpha={alpha:g}  lambda={lam:g}  ({hyper.get('status')})"
     )
-
-    total_n = champion_sample_n(silver)
     item1_rows = apply_share_floor(
         rank_paths(actually_built(silver, 1), p0, p_avg, alpha, cfg["n_min_item1"], lam),
         total_n,
         float(cfg.get("min_pick_share_item1", 0.03)),
     )
     if not item1_rows:
-        raise RuntimeError("No reliable Item 1 candidates.")
+        raw = actually_built(silver, 1)
+        if not raw:
+            raise RuntimeError("No Item 1 data from Lolalytics.")
+        path, (games, wins) = max(raw.items(), key=lambda row: row[1][0])
+        scored = score(wins, games, p0, p_avg, alpha, 0, lam) or {
+            "wr": wins / games if games else 0.0,
+            "tilde": 0.5,
+            "delta": 0.0,
+            "ci": 0.0,
+            "U": 0.0,
+            "n": games,
+            "reject": False,
+        }
+        scored["U"] = scored.get("U") or 0.0
+        scored["reject"] = False
+        item1_rows = [(path, scored)]
+        print(f"Item 1 below floor; using most common n={games:.0f}")
     item1 = item1_rows[0][0]
 
     item2_all = apply_share_floor(
@@ -1317,7 +1367,7 @@ def build_decision(cfg: dict, items: dict[int, str]) -> tuple[dict, dict, float,
             f"U={start_score['U']*100:+.2f} n={start_score['n']:.0f}"
         )
     else:
-        print("Start: no set met n floor; fallback Doran's Bow")
+        print("Start: no set met n floor; fallback Doran's Blade + Potion")
 
     skills = parse_skill_order(html, p0, p_avg, alpha, lam, cfg.get("n_min_start", 2000))
     runes = parse_runes(html)
