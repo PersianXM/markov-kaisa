@@ -242,10 +242,12 @@ $$
 | Starting | Blade + potion |
 | Buy order | Default 7-slot path |
 | Late swaps | Replace items 4–6 only |
-| Vs tanks / burst / AP | Same: late only, never core |
+| Vs live weak matchups | Late swaps for hardest current counters |
+| Vs tanks / burst / AP | Archetype late swaps if draft is mixed |
 | Wards | Control + sweeper |
 
-Do not swap the 3-item core for a situational brick.
+Do not swap the 3-item core for a situational brick. Pick late items from the
+matchup block that fits the enemy team you see in that game.
 
 <p align="center"><sub>■ ■  ■ ■</sub></p>
 
@@ -283,7 +285,8 @@ No extra pip packages for the generator. Stdlib only.
 [■] joint late search
 [■] any-rank picker
 [■] daily holdout
-[ ] richer matchup policy from live enemy data
+[■] live counter late-item branches
+[ ] support synergy branches
 [ ] true 7-slot likelihood if Lolalytics adds itemSet6
 ```
 
