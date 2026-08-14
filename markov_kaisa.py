@@ -1914,7 +1914,6 @@ def rank_gem_cores(
     picked: list[tuple[str, dict, float, float]] = []
     seen: set[frozenset[str]] = set()
     want = int(cfg.get("gem_count", 2))
-    prefs = {str(x) for x in (cfg.get("gem_item1_pref") or ["3032"])}
 
     def take(
         require_positive: bool,
@@ -1943,8 +1942,6 @@ def rank_gem_cores(
                 return
 
     take(True, 1, item1_in={default_item1})
-    if len(picked) < want:
-        take(True, 1, item1_in=prefs)
     if len(picked) < want:
         take(True, 1, item1_not={default_item1})
     if len(picked) < want:

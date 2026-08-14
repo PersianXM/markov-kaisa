@@ -165,7 +165,6 @@ Edit `config.json` for paths and floors. Rank does **not** belong there for dail
 | `gem_lambda_scale` | Gem Hunter CI penalty vs the U path (default `0.65`) |
 | `gem_n_min_core` | Absolute sample floor for a gem core (default `120`) |
 | `gem_prior_tier` | Discovery sample for underpicked cores (default `platinum_plus`) |
-| `gem_item1_pref` | First-item ids slot 2 tries first (`3032` = Yun Tal) |
 | `gem_max_pick_share` | Prefer cores below this share |
 | `gem_count` | Extra item sets to write (default `2`) |
 
@@ -214,13 +213,13 @@ $$
 
 A path with $n < n_{\min}$ has no $U$. It is rejected.
 
-Gem Hunter keeps the same $U$, then adds a rarity bonus and writes **two more item sets**. The default Markov set is unchanged. Discovery uses a thicker prior (Platinum+ / all) so an underpicked first item like Yun Tal can still appear in a thin Silver sample.
+Gem Hunter keeps the same $U$, then adds a rarity bonus and writes **two more item sets**. The default Markov set is unchanged. Discovery uses a thicker prior (Platinum+ / all) so an underpicked first item can still appear in a thin Silver sample.
 
 $$
 G = U_{\mathrm{gem}} + \nu \log(s_{\max} / s)
 $$
 
-$s$ is the core's pick share. Cores already chosen by the U path are excluded. Slot 1 prefers a different third item on the same first item. Slot 2 prefers a different first item. Each surviving core gets its own League item set named by raw winrate (`Gem Hunter 53%`).
+$s$ is the core's pick share. Cores already chosen by the U path are excluded. Slot 1 prefers a different third item on the same first item. Slot 2 prefers a different first item. Both slots rank by $G$ from live data. Each surviving core gets its own League item set named by raw winrate (`Gem Hunter 53%`).
 
 **Actually-Built**, not Exact: losers who FF never finish Exact rows, so Exact WR is biased down.
 
