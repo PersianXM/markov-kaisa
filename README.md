@@ -70,6 +70,13 @@ Yesterday's core is rescored on today's sample: stable, faded, or improved.
 Your rank is the likelihood. A thicker nearby rank is the late-item prior.
 </td>
 </tr>
+<tr>
+<td width="33%" valign="top">
+<img src="docs/assets/icon-utility.png" alt="U-shaped brick" width="40"><br>
+<strong>GEM HUNTER</strong><br>
+Relaxes floors, scores rarity, writes two extra item sets. Default Markov stays.
+</td>
+</tr>
 </table>
 
 <p align="center"><sub>■ ■    ■ ■ ■</sub></p>
@@ -82,9 +89,9 @@ Your rank is the likelihood. A thicker nearby rank is the late-item prior.
 
 ```text
 ┌──────────┐     ┌──────────────┐     ┌──────────┐     ┌───────────┐
-│   YOU    │ ──► │  LOLALYTICS  │ ──► │  SCORE U │ ──► │ ITEM SET  │
-│  rank +  │     │ Actually-    │     │ shrink,  │     │ 7 slots + │
-│  RUN.bat │     │ Built paths  │     │ Δ, CI    │     │ late swap │
+│   YOU    │ ──► │  LOLALYTICS  │ ──► │  SCORE U │ ──► │ 3 SETS    │
+│  rank +  │     │ Actually-    │     │ shrink,  │     │ U + 2 gem │
+│  RUN.bat │     │ Built paths  │     │ Δ, CI, G │     │ hunters   │
 └──────────┘     └──────────────┘     └──────────┘     └───────────┘
 ```
 
@@ -150,10 +157,16 @@ Edit `config.json` for paths and floors. Rank does **not** belong there for dail
 | :--- | :--- |
 | `alpha_rank` | Empirical Bayes strength (default `800`) |
 | `lambda_risk` | CI penalty (default `0.55`) |
-| `n_min_*` | Hard sample floors by stage |
+| `n_min_*` | Hard sample floors by stage. On a fresh patch these shrink with sample size. |
 | `min_pick_share_*` | Drop rare paths |
 | `core_search_k` | How many cores enter joint search |
 | `league_root` | League install |
+| `gem_alpha_scale` | Shrinkage for gem cores vs the U path (default `0.25`) |
+| `gem_lambda_scale` | Gem Hunter CI penalty vs the U path (default `0.65`) |
+| `gem_n_min_core` | Absolute sample floor for a gem core (default `120`) |
+| `gem_prior_tier` | Discovery sample for underpicked cores (default `platinum_plus`) |
+| `gem_max_pick_share` | Prefer cores below this share |
+| `gem_count` | Extra item sets to write (default `2`) |
 
 ```json
 {
@@ -200,6 +213,14 @@ $$
 
 A path with $n < n_{\min}$ has no $U$. It is rejected.
 
+Gem Hunter keeps the same $U$, then adds a rarity bonus and writes **two more item sets**. The default Markov set is unchanged. Discovery uses a thicker prior (Platinum+ / all) so an underpicked first item can still appear in a thin Silver sample.
+
+$$
+G = U_{\mathrm{gem}} + \nu \log(s_{\max} / s)
+$$
+
+$s$ is the core's pick share. Cores already chosen by the U path are excluded. Slot 1 prefers a different third item on the same first item. Slot 2 prefers a different first item. Both slots rank by $G$ from live data. Each surviving core gets its own League item set named by raw winrate (`Gem Hunter 53%`).
+
 **Actually-Built**, not Exact: losers who FF never finish Exact rows, so Exact WR is biased down.
 
 $$
@@ -242,10 +263,15 @@ $$
 | Starting | Blade + potion |
 | Buy order | Default 7-slot path |
 | Late swaps | Replace items 4–6 only |
-| Vs tanks / burst / AP | Same: late only, never core |
+| Vs live weak matchups | Late swaps for hardest current counters |
+| Vs tanks / burst / AP | Archetype late swaps if draft is mixed |
 | Wards | Control + sweeper |
+| **Markov Kai'Sa** | The U-max path. Default. |
+| **Gem Hunter 53%** | Two separate underpicked cores, titled by that core's winrate. Same start/runes, own buy order. |
 
-Do not swap the 3-item core for a situational brick.
+Do not swap the 3-item core for a situational brick. Pick late items from the
+matchup block that fits the enemy team you see in that game. Pick a Gem Hunter
+set only when you want the underpicked path, not the conservative U path.
 
 <p align="center"><sub>■ ■  ■ ■</sub></p>
 
@@ -283,7 +309,9 @@ No extra pip packages for the generator. Stdlib only.
 [■] joint late search
 [■] any-rank picker
 [■] daily holdout
-[ ] richer matchup policy from live enemy data
+[■] live counter late-item branches
+[■] gem hunter (two extra item sets)
+[ ] support synergy branches
 [ ] true 7-slot likelihood if Lolalytics adds itemSet6
 ```
 
