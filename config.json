@@ -29,5 +29,19 @@
   "min_pick_share_core": 0.01,
   "core_search_k": 3,
   "fade_blacklist_streak": 3,
-  "fade_blacklist_days": 7
+  "fade_blacklist_days": 7,
+  "gem_alpha_scale": 0.25,
+  "gem_lambda_scale": 0.65,
+  "gem_min_pick_share": 0.0004,
+  "gem_max_pick_share": 0.12,
+  "gem_rarity_bonus": 0.005,
+  "gem_n_min_core": 120,
+  "gem_n_min_item4": 80,
+  "gem_n_min_item5": 50,
+  "gem_n_min_item6": 40,
+  "gem_n_min_boots": 80,
+  "gem_prior_tier": "platinum_plus",
+  "gem_prior_region": "all",
+  "gem_item1_pref": ["3032"],
+  "gem_count": 2
 }

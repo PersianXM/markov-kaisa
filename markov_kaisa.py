@@ -833,13 +833,15 @@ def live_matchup_branches(
     chosen: set[str],
     n_min: float = 80,
     weak_limit: int = 3,
+    payload: dict | None = None,
 ) -> tuple[list[dict], list[dict]]:
     """Build pre-game late-item branches from live Lolalytics counters."""
-    try:
-        payload = fetch_counters(cfg)
-    except Exception as exc:
-        print(f"Counter fetch failed ({exc}); using archetype branches only.")
-        payload = {}
+    if payload is None:
+        try:
+            payload = fetch_counters(cfg)
+        except Exception as exc:
+            print(f"Counter fetch failed ({exc}); using archetype branches only.")
+            payload = {}
 
     rows = list(payload.get("counters") or [])
     stats = payload.get("stats") or {}
@@ -1557,7 +1559,14 @@ def build_decision(cfg: dict, items: dict[int, str]) -> tuple[dict, dict, float,
 
     print("Fetching live counters for late-item branches...")
     champions = load_champions()
-    branches, weak_rows = live_matchup_branches(cfg, champions, chosen)
+    try:
+        counter_payload = fetch_counters(cfg)
+    except Exception as exc:
+        print(f"Counter fetch failed ({exc}); using archetype branches only.")
+        counter_payload = {}
+    branches, weak_rows = live_matchup_branches(
+        cfg, champions, chosen, payload=counter_payload
+    )
     if weak_rows:
         print(
             "Hard lanes (live): "
@@ -1646,13 +1655,411 @@ def build_decision(cfg: dict, items: dict[int, str]) -> tuple[dict, dict, float,
         },
         "grid": grid,
     }
+    gem_cfg = gem_search_config(cfg)
+    decision["gems"] = hunt_gem_paths(
+        items,
+        gem_cfg,
+        silver,
+        prior,
+        selected_core,
+        p0,
+        p_avg,
+        alpha,
+        lam,
+        start,
+        skills,
+        runes,
+        champions,
+        counter_payload,
+        total_n,
+        weak_rows,
+    )
     return decision, silver, p0, p_avg, alpha
 
 
-def make_itemset(cfg: dict, decision: dict) -> dict:
-    def block(title: str, ids: list[str]) -> dict:
+GEM_SLOT_KEYS = ("markov-kaisa-gem-1", "markov-kaisa-gem-2")
+
+
+def gem_uid(slot: int) -> str:
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, GEM_SLOT_KEYS[slot - 1]))
+
+
+def core_identity(path: str) -> frozenset[str]:
+    return frozenset(path.split("_"))
+
+
+def gem_search_config(cfg: dict) -> dict:
+    """Gem floors are absolute. Do not rescale the already-thinned U-path floors."""
+    out = dict(cfg)
+    out["n_min_core"] = float(cfg.get("gem_n_min_core", 120))
+    out["n_min_item4"] = float(cfg.get("gem_n_min_item4", 80))
+    out["n_min_item5"] = float(cfg.get("gem_n_min_item5", 50))
+    out["n_min_item6"] = float(cfg.get("gem_n_min_item6", 40))
+    out["n_min_boots"] = float(cfg.get("gem_n_min_boots", 80))
+    out["n_min_item2"] = float(cfg.get("gem_n_min_item2", 80))
+    return out
+
+
+def gem_set_title(wr: float, used: set[str] | None = None) -> str:
+    used = used if used is not None else set()
+    pct = int(round((wr or 0.0) * 100.0))
+    title = f"Gem Hunter {pct}%"
+    if title in used:
+        tenths = round((wr or 0.0) * 1000.0) / 10.0
+        title = f"Gem Hunter {tenths:.1f}%"
+    return title
+
+
+def buy_plan(core: str, finished: dict) -> tuple[list[str], list[str]]:
+    core_ids = core.split("_")
+    buy_order = [
+        core_ids[0],
+        finished["boots"]["id"],
+        core_ids[1],
+        core_ids[2],
+        finished["item4"]["id"],
+        finished["item5"]["id"],
+        finished["item6"]["id"],
+    ]
+    chosen = set(buy_order)
+    situational: list[str] = []
+    for row in finished.get("leftovers") or []:
+        iid = row.get("id")
+        if iid and iid not in chosen and iid not in situational and not row.get("fallback"):
+            situational.append(iid)
+        if len(situational) >= 6:
+            break
+    return buy_order, situational
+
+
+def compact_path_decision(
+    items: dict[int, str],
+    core: str,
+    scored: dict,
+    finished: dict,
+    start: list[str],
+    skills: dict | None,
+    runes: dict | None,
+    branches: list[dict],
+    weak_rows: list[dict],
+    title: str,
+    slot: int,
+    share: float,
+    gem_score: float,
+    lam: float,
+) -> dict:
+    buy_ids, situ_ids = buy_plan(core, finished)
+    return {
+        "set_title": title,
+        "set_uid_key": GEM_SLOT_KEYS[slot - 1],
+        "slot": slot,
+        "gem": {
+            "G": gem_score,
+            "share": share,
+            "lambda": lam,
+        },
+        "item1": {"id": buy_ids[0], "name": item_name(items, buy_ids[0])},
+        "core": {
+            "path": core,
+            "name": path_name(items, core),
+            "wr": scored.get("wr"),
+            "tilde": scored.get("tilde"),
+            "delta": scored.get("delta"),
+            "U": scored.get("U"),
+            "n": scored.get("n"),
+        },
+        "boots": {
+            "id": finished["boots"]["id"],
+            "name": item_name(items, finished["boots"]["id"]),
+        },
+        "item4": {
+            "id": finished["item4"]["id"],
+            "name": item_name(items, finished["item4"]["id"]),
+        },
+        "item5": {
+            "id": finished["item5"]["id"],
+            "name": item_name(items, finished["item5"]["id"]),
+        },
+        "item6": {
+            "id": finished["item6"]["id"],
+            "name": item_name(items, finished["item6"]["id"]),
+        },
+        "start": [{"id": i, "name": item_name(items, i)} for i in start],
+        "buy_order": [{"id": i, "name": item_name(items, i)} for i in buy_ids],
+        "situational": [{"id": i, "name": item_name(items, i)} for i in situ_ids],
+        "policy_branches": [
+            {
+                "key": branch["key"],
+                "title": branch["title"],
+                "source": branch["source"],
+                "champions": branch.get("champions") or [],
+                "items": [
+                    {"id": iid, "name": item_name(items, iid)} for iid in branch["ids"]
+                ],
+            }
+            for branch in branches
+            if branch.get("ids")
+        ],
+        "skills": skills,
+        "runes": runes,
+        "matchups": [
+            {
+                "champion": row["name"],
+                "n": row["n"],
+                "wr": row["vs_wr"],
+                "lane": row.get("lane"),
+            }
+            for row in weak_rows
+        ],
+        "joint": {
+            "u_joint": finished["u_joint"],
+            "u45": finished["u45"],
+        },
+    }
+
+
+def fetch_gem_prior(cfg: dict, fallback: dict) -> tuple[dict, str, str]:
+    """Thicker sample for discovering underpicked cores the chosen rank barely plays."""
+    tier = str(cfg.get("gem_prior_tier") or "platinum_plus")
+    region = str(cfg.get("gem_prior_region") or "all")
+    tries = ((tier, region), ("platinum_plus", "all"), ("all", "all"))
+    seen: set[tuple[str, str]] = set()
+    for t, r in tries:
+        key = (t.lower(), r.lower())
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            return fetch_itemsets(cfg, t, r), t, r
+        except Exception as exc:
+            print(f"Gem prior {t}/{r} failed ({exc})")
+    return fallback, str(cfg.get("prior_tier") or "emerald"), str(
+        cfg.get("fallback_prior_region") or "all"
+    )
+
+
+def score_gem_path(
+    silver3: dict,
+    prior3: dict,
+    path: str,
+    p0: float,
+    p_avg: float,
+    alpha: float,
+    lam: float,
+    n_min: float,
+) -> dict | None:
+    silver_row = lookup(silver3, path)
+    prior_row = lookup(prior3, path)
+    n_s = silver_row[0] if silver_row else 0.0
+    n_p = prior_row[0] if prior_row else 0.0
+    if n_p < n_min and n_s < n_min:
+        return None
+    tilde = hierarchical_tilde(silver_row, prior_row, p0, alpha)
+    if tilde is None:
+        return None
+    if n_p >= n_min and prior_row:
+        games, wins = prior_row
+    else:
+        games, wins = silver_row if silver_row else (n_p, 0.0)
+    wr = wins / games if games else 0.0
+    utility = late_utility(tilde, games, p_avg, alpha, lam)
+    return {
+        "wr": wr,
+        "tilde": tilde,
+        "delta": tilde - p_avg,
+        "U": utility,
+        "n": games,
+        "n_rank": n_s,
+        "n_prior": n_p,
+        "reject": False,
+    }
+
+
+def rank_gem_cores(
+    silver: dict,
+    gem_prior: dict,
+    p0: float,
+    p_avg: float,
+    alpha: float,
+    lam: float,
+    cfg: dict,
+    total_prior: float,
+    exclude: set[frozenset[str]],
+    default_item1: str,
+) -> list[tuple[str, dict, float, float]]:
+    n_min = float(cfg["n_min_core"])
+    min_share = float(cfg.get("gem_min_pick_share", 0.0004))
+    max_share = float(cfg.get("gem_max_pick_share", 0.12))
+    rarity = float(cfg.get("gem_rarity_bonus", 0.005))
+    silver3 = actually_built(silver, 3)
+    prior3 = actually_built(gem_prior, 3)
+    scored: list[tuple[str, dict, float, float]] = []
+    for path in set(silver3) | set(prior3):
+        ident = core_identity(path)
+        if ident in exclude:
+            continue
+        s = score_gem_path(silver3, prior3, path, p0, p_avg, alpha, lam, n_min)
+        if not s or s["U"] is None:
+            continue
+        share = (s["n"] / total_prior) if total_prior else 0.0
+        if share < min_share:
+            continue
+        rarity_term = rarity * math.log(max(max_share, min_share) / max(share, min_share))
+        if share > max_share:
+            rarity_term = min(rarity_term, 0.0)
+        gem_score = (s["U"] or 0.0) + rarity_term
+        scored.append((path, s, share, gem_score))
+    scored.sort(key=lambda row: row[3], reverse=True)
+
+    picked: list[tuple[str, dict, float, float]] = []
+    seen: set[frozenset[str]] = set()
+    want = int(cfg.get("gem_count", 2))
+    prefs = {str(x) for x in (cfg.get("gem_item1_pref") or ["3032"])}
+
+    def take(
+        require_positive: bool,
+        add: int,
+        item1_in: set[str] | None = None,
+        item1_not: set[str] | None = None,
+    ) -> None:
+        added = 0
+        for path, s, share, gem_score in scored:
+            if share > max_share:
+                continue
+            if require_positive and (s.get("U") or 0.0) < 0:
+                continue
+            item1 = path.split("_")[0]
+            if item1_in is not None and item1 not in item1_in:
+                continue
+            if item1_not is not None and item1 in item1_not:
+                continue
+            ident = core_identity(path)
+            if ident in seen or ident in exclude:
+                continue
+            seen.add(ident)
+            picked.append((path, s, share, gem_score))
+            added += 1
+            if len(picked) >= want or added >= add:
+                return
+
+    take(True, 1, item1_in={default_item1})
+    if len(picked) < want:
+        take(True, 1, item1_in=prefs)
+    if len(picked) < want:
+        take(True, 1, item1_not={default_item1})
+    if len(picked) < want:
+        take(True, want)
+    if len(picked) < want:
+        take(False, want)
+    return picked
+
+
+def hunt_gem_paths(
+    items: dict[int, str],
+    cfg: dict,
+    silver: dict,
+    prior: dict,
+    default_core: str,
+    p0: float,
+    p_avg: float,
+    alpha: float,
+    lam: float,
+    start: list[str],
+    skills: dict | None,
+    runes: dict | None,
+    champions: dict[int, str],
+    counter_payload: dict,
+    total_n: float,
+    weak_rows: list[dict],
+) -> list[dict]:
+    lam_gem = lam * float(cfg.get("gem_lambda_scale", 0.65))
+    alpha_gem = max(80.0, alpha * float(cfg.get("gem_alpha_scale", 0.25)))
+    print("Fetching gem prior (thicker sample for underpicked cores)...")
+    gem_sets, gem_tier, gem_region = fetch_gem_prior(cfg, prior)
+    prior3 = actually_built(gem_sets, 3)
+    total_prior = sum(games for games, _wins in prior3.values())
+    print(
+        f"Gem hunter: prior={gem_tier}/{gem_region}  n={total_prior:.0f}  "
+        f"n_min_core={cfg['n_min_core']:g}  alpha={alpha_gem:g}  "
+        f"lambda={lam_gem:.3f}"
+    )
+    ranked = rank_gem_cores(
+        silver,
+        gem_sets,
+        p0,
+        p_avg,
+        alpha_gem,
+        lam_gem,
+        cfg,
+        total_prior,
+        {core_identity(default_core)},
+        default_core.split("_")[0],
+    )
+    gems: list[dict] = []
+    used_titles: set[str] = set()
+    n_min = float(cfg["n_min_core"])
+    silver3 = actually_built(silver, 3)
+    for slot, (path, scored, share, gem_score) in enumerate(ranked, 1):
+        pair = "_".join(path.split("_")[:2])
+        print(
+            f"  gem {slot}: {path_name(items, path)}  "
+            f"U={scored['U']*100:+.2f}  wr={scored['wr']*100:.1f}%  "
+            f"share={share*100:.2f}%  G={gem_score*100:+.2f}  "
+            f"n_prior={scored.get('n_prior', 0):.0f}  "
+            f"n_rank={scored.get('n_rank', 0):.0f}"
+        )
+        silver_n = lookup(silver3, path)
+        primary, secondary = (
+            (silver, gem_sets)
+            if silver_n and silver_n[0] >= n_min
+            else (gem_sets, silver)
+        )
+        finished = joint_finish(
+            items, primary, secondary, path, pair, p0, p_avg, alpha_gem, lam_gem, cfg
+        )
+        buy_ids, _situ = buy_plan(path, finished)
+        branches, _weak = live_matchup_branches(
+            cfg, champions, set(buy_ids), payload=counter_payload
+        )
+        title = gem_set_title(float(scored.get("wr") or 0.0), used_titles)
+        used_titles.add(title)
+        gems.append(
+            compact_path_decision(
+                items,
+                path,
+                scored,
+                finished,
+                start,
+                skills,
+                runes,
+                branches,
+                weak_rows,
+                title,
+                slot,
+                share,
+                gem_score,
+                lam_gem,
+            )
+        )
+        print(
+            f"    {title}: "
+            + " -> ".join(item_name(items, iid) for iid in buy_ids)
+        )
+    if not gems:
+        print("  no underpicked cores cleared the gem floors")
+    return gems
+
+
+def make_itemset(
+    cfg: dict,
+    decision: dict,
+    title: str | None = None,
+    uid_key: str = "markov-kaisa-itemset",
+    sortrank: int = 0,
+) -> dict:
+    def block(block_title: str, ids: list[str]) -> dict:
         return {
-            "type": title,
+            "type": block_title,
             "hideIfSummonerSpell": "",
             "showIfSummonerSpell": "",
             "items": [{"id": item_id, "count": 1} for item_id in ids],
@@ -1673,13 +2080,13 @@ def make_itemset(cfg: dict, decision: dict) -> dict:
             blocks.append(block(branch["title"], ids))
     blocks.append(block("Wards", ["3340", "3364"]))
     return {
-        "title": cfg["build_title"],
+        "title": title or decision.get("set_title") or cfg["build_title"],
         "type": "custom",
         "map": "any",
         "mode": "any",
-        "sortrank": 0,
+        "sortrank": sortrank,
         "startedFrom": "blank",
-        "uid": str(uuid.uuid5(uuid.NAMESPACE_URL, "markov-kaisa-itemset")),
+        "uid": str(uuid.uuid5(uuid.NAMESPACE_URL, uid_key)),
         "associatedChampions": [cfg["champion_id"]],
         "associatedMaps": cfg["associated_maps"],
         "preferredItemSlots": [],
@@ -1732,16 +2139,18 @@ def write_json(path: Path, payload: dict) -> None:
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
-def prune_stale_recommended(cfg: dict, itemset: dict) -> list[Path]:
+def prune_stale_recommended(cfg: dict, itemset: dict, keep_name: str | None = None) -> list[Path]:
     dest_dir = Path(cfg["itemset_dir"])
-    keep = Path(cfg["itemset_filename"]).name
+    keep = {Path(cfg["itemset_filename"]).name, "RIOT_ItemSet_GemHunter_1.json", "RIOT_ItemSet_GemHunter_2.json"}
+    if keep_name:
+        keep.add(Path(keep_name).name)
     uid = itemset.get("uid")
     title = itemset.get("title")
     removed: list[Path] = []
     if not dest_dir.is_dir():
         return removed
     for path in dest_dir.glob("*.json"):
-        if path.name == keep:
+        if path.name in keep:
             continue
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
@@ -1753,16 +2162,48 @@ def prune_stale_recommended(cfg: dict, itemset: dict) -> list[Path]:
     return removed
 
 
-def install_itemset(cfg: dict, itemset: dict) -> tuple[Path, Path]:
+def install_itemset(
+    cfg: dict,
+    itemset: dict,
+    filename: str | None = None,
+) -> tuple[Path, Path]:
     dest_dir = Path(cfg["itemset_dir"])
     dest_dir.mkdir(parents=True, exist_ok=True)
-    dest = dest_dir / cfg["itemset_filename"]
+    dest = dest_dir / (filename or cfg["itemset_filename"])
     dest.write_text(json.dumps(itemset, separators=(",", ":"), ensure_ascii=False), encoding="utf-8")
-    stale = prune_stale_recommended(cfg, itemset)
+    stale = prune_stale_recommended(cfg, itemset, keep_name=dest.name)
     for path in stale:
         print(f"Removed leftover item set: {path}")
     index_path = upsert_client_index(cfg, itemset)
     return dest, index_path
+
+
+def drop_itemsets(cfg: dict, uids: set[str]) -> None:
+    if not uids:
+        return
+    index_path = Path(cfg["itemsets_index"])
+    if index_path.exists():
+        data = json.loads(index_path.read_text(encoding="utf-8"))
+        before = list(data.get("itemSets") or [])
+        kept = [row for row in before if row.get("uid") not in uids]
+        if len(kept) != len(before):
+            data["itemSets"] = kept
+            data["timestamp"] = int(datetime.now(timezone.utc).timestamp() * 1000)
+            index_path.write_text(
+                json.dumps(data, separators=(",", ":"), ensure_ascii=False),
+                encoding="utf-8",
+            )
+    dest_dir = Path(cfg["itemset_dir"])
+    if not dest_dir.is_dir():
+        return
+    for path in dest_dir.glob("*.json"):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if data.get("uid") in uids:
+            path.unlink()
+            print(f"Removed leftover item set: {path}")
 
 
 def print_summary(cfg: dict, decision: dict, dest: Path, index_path: Path) -> None:
@@ -1834,13 +2275,35 @@ def print_summary(cfg: dict, decision: dict, dest: Path, index_path: Path) -> No
                 for row in decision["matchups"]
             )
         )
+    gems = decision.get("gems") or []
+    if gems:
+        print("\nGem Hunter")
+        for gem in gems:
+            g = gem.get("gem") or {}
+            share = g.get("share")
+            share_txt = "n/a" if share is None else f"{share*100:.1f}%"
+            gu = (gem.get("core") or {}).get("U")
+            tu = "n/a" if gu is None else f"{gu*100:+.2f}"
+            gg = g.get("G")
+            gg_txt = "n/a" if gg is None else f"{gg*100:+.2f}"
+            print(f"  {gem.get('set_title')}")
+            print(
+                f"    core {(gem.get('core') or {}).get('name')}  "
+                f"U={tu}  G={gg_txt}  share={share_txt}  "
+                f"n={(gem.get('core') or {}).get('n')}"
+            )
+            print(
+                "    buy: "
+                + " -> ".join(row["name"] for row in gem.get("buy_order") or [])
+            )
     print(f"\nChampion file:\n  {dest}")
     print(f"Client index:\n  {index_path}")
     if league_client_running():
         print("\nLeague is open. Close the client completely, then reopen it.")
         print("Otherwise the client may overwrite ItemSets.json on exit.")
     else:
-        print("\nOpen League and select Kai'Sa. The set appears under Item Sets.")
+        print("\nOpen League and select Kai'Sa. The sets appear under Item Sets.")
+        print("Markov Kai'Sa is the U path. Gem Hunter sets are named by core winrate.")
 
 
 LOLALYTICS_TIERS = (
@@ -2054,8 +2517,27 @@ def main() -> int:
         write_json(OUTPUT_DIR / "decision.json", decision)
         write_json(OUTPUT_DIR / "validation.json", validation)
         write_json(OUTPUT_DIR / cfg["itemset_filename"], itemset)
+        gem_itemsets: list[tuple[dict, str]] = []
+        for gem in decision.get("gems") or []:
+            slot = int(gem.get("slot") or (len(gem_itemsets) + 1))
+            gem_set = make_itemset(
+                cfg,
+                gem,
+                title=gem["set_title"],
+                uid_key=gem["set_uid_key"],
+                sortrank=slot,
+            )
+            filename = f"RIOT_ItemSet_GemHunter_{slot}.json"
+            write_json(OUTPUT_DIR / filename, gem_set)
+            gem_itemsets.append((gem_set, filename))
         append_history(snapshot)
         dest, index_path = install_itemset(cfg, itemset)
+        for gem_set, filename in gem_itemsets:
+            _gem_dest, index_path = install_itemset(cfg, gem_set, filename=filename)
+            print(f"Installed {gem_set['title']}")
+        used_uids = {row[0]["uid"] for row in gem_itemsets}
+        stale_gem_uids = {gem_uid(slot) for slot in (1, 2)} - used_uids
+        drop_itemsets(cfg, stale_gem_uids)
         print_summary(cfg, decision, dest, index_path)
         return 0
     except Exception as exc:

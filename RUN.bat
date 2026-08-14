@@ -72,8 +72,9 @@ echo   %DT%# # #     # #%RST%
 echo   %CB% %RST%  %WT%RANK%RST%        %CT%%RANK%%RST%
 echo   %IB% %RST%  %WT%FETCH%RST%       live Lolalytics
 echo   %CB% %RST%  %WT%SCORE%RST%       Markov U protocol
-echo   %TB% %RST%  %WT%CHECK%RST%       yesterday on today
-echo   %IB% %RST%  %WT%INSTALL%RST%     League item set
+echo   %TB% %RST%  %WT%GEM%RST%         two hunter item sets
+echo   %IB% %RST%  %WT%CHECK%RST%       yesterday on today
+echo   %CB% %RST%  %WT%INSTALL%RST%     three League item sets
 echo   %DT%#     # # #%RST%
 echo.
 
@@ -83,7 +84,7 @@ echo.
 
 if not "%ERR%"=="0" goto :fail
 echo   %CB%  %RST% %CB%  %RST% %CB%  %RST%
-echo   %OK%[OK]%RST%  %WT%Markov KaiSa is in the League client.%RST%
+echo   %OK%[OK]%RST%  %WT%Markov KaiSa plus two Gem Hunter sets are in the client.%RST%
 echo   %DT%Close League fully, reopen, select KaiSa, open Item Sets.%RST%
 goto :done
 
