@@ -1,13 +1,19 @@
 #!/usr/bin/env python3
-"""Generate the Markov Kai'Sa item set from Lolalytics and install it."""
+"""Generate the Markov Kai'Sa item set from Lolalytics and install it.
+
+This module downloads item set data, computes empirical Bayes estimates of winrates,
+and builds optimal item paths for Kai'Sa based on the current patch statistics.
+"""
 
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
 import math
 import re
 import sys
+import time
 import urllib.request
 import uuid
 from collections import Counter
@@ -20,61 +26,181 @@ OUTPUT_DIR = ROOT / "output"
 HISTORY_DIR = ROOT / "history"
 HISTORY_PATH = HISTORY_DIR / "daily.jsonl"
 BLACKLIST_PATH = HISTORY_DIR / "blacklist.json"
-DDRAGON_TIMEOUT = 25
-LOL_TIMEOUT = 45
+DDRAGON_TIMEOUT = 10
+LOL_TIMEOUT = 12
 UA = {
-    "User-Agent": "MarkovKaisa/1.0",
-    "Referer": "https://lolalytics.com/lol/kaisa/build/",
+    "User-Agent": "MarkovLeague/1.0",
     "Origin": "https://lolalytics.com",
     "Accept": "application/json,text/html,*/*",
 }
 
+SUPPORTED_CHAMPIONS: dict[str, dict] = {
+    "kaisa": {
+        "slug": "kaisa",
+        "name": "Kai'Sa",
+        "id": 145,
+        "folder": "Kaisa",
+        "title": "Markov Kai'Sa",
+        "lane": "bottom",
+    },
+    "tristana": {
+        "slug": "tristana",
+        "name": "Tristana",
+        "id": 18,
+        "folder": "Tristana",
+        "title": "Markov Tristana",
+        "lane": "bottom",
+    },
+}
+
+CHAMPION_ALIASES: dict[str, str] = {
+    "kaisa": "kaisa",
+    "kai'sa": "kaisa",
+    "kais": "kaisa",
+    "tristana": "tristana",
+    "tristina": "tristana",
+    "trist": "tristana",
+}
+
+
+def normalize_champion(name: str | None) -> str:
+    """Normalizes a champion name input to a canonical slug."""
+    if not name:
+        return "kaisa"
+    cleaned = re.sub(r"[^a-z0-9]", "", str(name).strip().lower())
+    return CHAMPION_ALIASES.get(cleaned, CHAMPION_ALIASES.get(str(name).strip().lower(), "kaisa"))
+
+
+def apply_champion(cfg: dict, champ_input: str | None = None) -> dict:
+    """Applies champion metadata to the config dict."""
+    slug = normalize_champion(champ_input or cfg.get("champion") or "kaisa")
+    meta = SUPPORTED_CHAMPIONS.get(slug, SUPPORTED_CHAMPIONS["kaisa"])
+    cfg["champion"] = meta["slug"]
+    cfg["champion_name"] = meta["name"]
+    cfg["champion_id"] = meta["id"]
+    cfg["build_title"] = meta["title"]
+    if "lane" not in cfg or not cfg["lane"]:
+        cfg["lane"] = meta["lane"]
+    if cfg.get("league_root"):
+        cfg["itemset_dir"] = str(
+            Path(cfg["league_root"]) / "Config" / "Champions" / meta["folder"] / "Recommended"
+        )
+    return cfg
+
 
 def load_config() -> dict:
+    """Loads config.json from disk."""
     return json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
 
 
-def http_bytes(url: str, timeout: int = LOL_TIMEOUT) -> bytes:
-    req = urllib.request.Request(url, headers=UA)
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return resp.read()
+def http_bytes(url: str, timeout: int = LOL_TIMEOUT, referer: str | None = None) -> bytes:
+    """Fetches raw bytes from a URL with retries."""
+    if "ddragon.leagueoflegends.com" in url:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+            "Accept": "application/json,text/html,*/*",
+        }
+    else:
+        headers = dict(UA)
+        headers["Referer"] = referer or "https://lolalytics.com/"
+    req = urllib.request.Request(url, headers=headers)
+    last_err = None
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return resp.read()
+        except Exception as exc:
+            last_err = exc
+            time.sleep(0.5)
+    raise last_err or RuntimeError(f"Failed to fetch {url}")
 
 
-def http_json(url: str, timeout: int = LOL_TIMEOUT) -> dict:
-    return json.loads(http_bytes(url, timeout=timeout).decode("utf-8", "ignore"))
+def http_json(url: str, timeout: int = LOL_TIMEOUT, referer: str | None = None) -> dict:
+    """Fetches and parses JSON from a URL."""
+    return json.loads(http_bytes(url, timeout=timeout, referer=referer).decode("utf-8", "ignore"))
 
 
-def http_text(url: str, timeout: int = LOL_TIMEOUT) -> str:
-    return http_bytes(url, timeout=timeout).decode("utf-8", "ignore")
+def http_text(url: str, timeout: int = LOL_TIMEOUT, referer: str | None = None) -> str:
+    """Fetches text from a URL."""
+    return http_bytes(url, timeout=timeout, referer=referer).decode("utf-8", "ignore")
+
+
+_ITEMS_CACHE: dict[int, str] | None = None
+_CHAMPIONS_CACHE: dict[int, str] | None = None
 
 
 def load_items() -> dict[int, str]:
-    versions = http_json(
-        "https://ddragon.leagueoflegends.com/api/versions.json",
-        timeout=DDRAGON_TIMEOUT,
-    )
-    ver = versions[0]
-    data = http_json(
-        f"https://ddragon.leagueoflegends.com/cdn/{ver}/data/en_US/item.json",
-        timeout=DDRAGON_TIMEOUT,
-    )["data"]
-    return {int(k): v["name"] for k, v in data.items()}
+    """Loads DDragon item ID-to-name mapping with disk cache."""
+    global _ITEMS_CACHE
+    if _ITEMS_CACHE is not None:
+        return _ITEMS_CACHE
+    cache_file = OUTPUT_DIR / "cache_items.json"
+    if cache_file.exists():
+        try:
+            data = json.loads(cache_file.read_text(encoding="utf-8"))
+            _ITEMS_CACHE = {int(k): str(v) for k, v in data.items()}
+            return _ITEMS_CACHE
+        except Exception:
+            pass
+    try:
+        versions = http_json(
+            "https://ddragon.leagueoflegends.com/api/versions.json",
+            timeout=10,
+        )
+        for ver in versions[:3]:
+            try:
+                data = http_json(
+                    f"https://ddragon.leagueoflegends.com/cdn/{ver}/data/en_US/item.json",
+                    timeout=20,
+                )["data"]
+                _ITEMS_CACHE = {int(k): v["name"] for k, v in data.items()}
+                cache_file.parent.mkdir(parents=True, exist_ok=True)
+                cache_file.write_text(json.dumps(_ITEMS_CACHE, ensure_ascii=False), encoding="utf-8")
+                return _ITEMS_CACHE
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return {}
 
 
 def load_champions() -> dict[int, str]:
-    versions = http_json(
-        "https://ddragon.leagueoflegends.com/api/versions.json",
-        timeout=DDRAGON_TIMEOUT,
-    )
-    ver = versions[0]
-    data = http_json(
-        f"https://ddragon.leagueoflegends.com/cdn/{ver}/data/en_US/champion.json",
-        timeout=DDRAGON_TIMEOUT,
-    )["data"]
-    return {int(v["key"]): v["name"] for v in data.values()}
+    """Loads DDragon champion ID-to-name mapping with disk cache."""
+    global _CHAMPIONS_CACHE
+    if _CHAMPIONS_CACHE is not None:
+        return _CHAMPIONS_CACHE
+    cache_file = OUTPUT_DIR / "cache_champions.json"
+    if cache_file.exists():
+        try:
+            data = json.loads(cache_file.read_text(encoding="utf-8"))
+            _CHAMPIONS_CACHE = {int(k): str(v) for k, v in data.items()}
+            return _CHAMPIONS_CACHE
+        except Exception:
+            pass
+    try:
+        versions = http_json(
+            "https://ddragon.leagueoflegends.com/api/versions.json",
+            timeout=10,
+        )
+        for ver in versions[:3]:
+            try:
+                data = http_json(
+                    f"https://ddragon.leagueoflegends.com/cdn/{ver}/data/en_US/champion.json",
+                    timeout=20,
+                )["data"]
+                _CHAMPIONS_CACHE = {int(v["key"]): v["name"] for v in data.values()}
+                cache_file.parent.mkdir(parents=True, exist_ok=True)
+                cache_file.write_text(json.dumps(_CHAMPIONS_CACHE, ensure_ascii=False), encoding="utf-8")
+                return _CHAMPIONS_CACHE
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return {145: "Kai'Sa", 18: "Tristana"}
 
 
 def item_name(items: dict[int, str], item_id: str) -> str:
+    """Resolves an item ID to its display name."""
     try:
         return items.get(int(item_id), item_id)
     except ValueError:
@@ -82,10 +208,12 @@ def item_name(items: dict[int, str], item_id: str) -> str:
 
 
 def path_name(items: dict[int, str], path: str) -> str:
+    """Converts an underscore-separated item path to display names."""
     return " -> ".join(item_name(items, p) for p in path.split("_"))
 
 
 def is_boots(items: dict[int, str], item_id: str) -> bool:
+    """Checks whether an item ID corresponds to boots."""
     name = item_name(items, item_id).lower()
     return any(
         key in name
@@ -94,6 +222,7 @@ def is_boots(items: dict[int, str], item_id: str) -> bool:
 
 
 def ddragon_patch() -> str:
+    """Returns the current live patch version from Data Dragon."""
     versions = http_json(
         "https://ddragon.leagueoflegends.com/api/versions.json",
         timeout=DDRAGON_TIMEOUT,
@@ -112,18 +241,21 @@ def resolve_live_patch(cfg: dict) -> str:
         f"https://lolalytics.com/lol/{cfg['champion']}/build/"
         f"?tier={cfg['tier']}&region={cfg['region']}&lane={cfg['lane']}"
     )
-    html = http_text(url)
-    match = re.search(
-        r'kaisa_[^"]*?_(\d+\.\d+)(?:_|")',
-        html,
-        re.I,
-    )
-    if not match:
-        match = re.search(r"Patch(?:</[^>]+>)?\s*(\d+\.\d+)", html, re.I)
-    if match:
-        patch = match.group(1)
-        print(f"Live patch from Lolalytics: {patch}")
-        return patch
+    try:
+        html = http_text(url, timeout=12, referer=url)
+        match = re.search(
+            rf"{cfg['champion']}_[^\"]*?_(\d+\.\d+)(?:_|\")",
+            html,
+            re.I,
+        )
+        if not match:
+            match = re.search(r"Patch(?:</[^>]+>)?\s*(\d+\.\d+)", html, re.I)
+        if match:
+            patch = match.group(1)
+            print(f"Live patch from Lolalytics: {patch}")
+            return patch
+    except Exception:
+        pass
 
     patch = ddragon_patch()
     print(f"Live patch from Data Dragon: {patch}")
@@ -131,6 +263,7 @@ def resolve_live_patch(cfg: dict) -> str:
 
 
 def fetch_itemsets(cfg: dict, tier: str, region: str) -> dict:
+    """Fetches Actually-Built item set data from Lolalytics API."""
     url = (
         "https://a1.lolalytics.com/mega/?ep=build-itemset&v=1"
         f"&patch={cfg['patch']}&c={cfg['champion']}&lane={cfg['lane']}"
@@ -143,24 +276,29 @@ def fetch_itemsets(cfg: dict, tier: str, region: str) -> dict:
 
 
 def fetch_baseline(cfg: dict) -> tuple[float, float]:
+    """Scrapes the champion's baseline winrate and average winrate from Lolalytics."""
     url = (
         f"https://lolalytics.com/lol/{cfg['champion']}/build/"
         f"?tier={cfg['tier']}&region={cfg['region']}"
         f"&lane={cfg['lane']}&patch={cfg['patch']}"
     )
-    html = http_text(url)
     p0 = 0.50
     p_avg = 0.50
-    m = re.search(r"has a (\d+\.\d+)% win rate", html)
-    if m:
-        p0 = float(m.group(1)) / 100.0
-    m = re.search(r"Average[^\d]{0,80}(\d+\.\d+)%", html)
-    if m:
-        p_avg = float(m.group(1)) / 100.0
+    try:
+        html = http_text(url, timeout=12, referer=url)
+        m = re.search(r"has a (\d+\.\d+)% win rate", html)
+        if m:
+            p0 = float(m.group(1)) / 100.0
+        m = re.search(r"Average[^\d]{0,80}(\d+\.\d+)%", html)
+        if m:
+            p_avg = float(m.group(1)) / 100.0
+    except Exception:
+        pass
     return p0, p_avg
 
 
 def max_set_depth(itemsets: dict, boot: bool = False) -> int:
+    """Returns the maximum item set depth available in the API response."""
     prefix = "itemBootSet" if boot else "itemSet"
     depths = []
     for key in itemsets:
@@ -174,6 +312,7 @@ def max_set_depth(itemsets: dict, boot: bool = False) -> int:
 
 
 def actually_built(itemsets: dict, t: int, boot: bool = False) -> dict[str, tuple[float, float]]:
+    """Aggregates Actually-Built paths at depth t from deeper item sets."""
     prefix = "itemBootSet" if boot else "itemSet"
     max_i = max_set_depth(itemsets, boot=boot)
     agg: dict[str, list[float]] = {}
@@ -191,10 +330,18 @@ def actually_built(itemsets: dict, t: int, boot: bool = False) -> dict[str, tupl
 
 
 def shrink(wins: float, games: float, p0: float, alpha: float) -> float:
+    """Computes empirical Bayes shrinkage estimate of winrate.
+
+    Formula: (wins + alpha * p0) / (games + alpha)
+    """
     return (wins + alpha * p0) / (games + alpha)
 
 
 def ci95(p: float, n: float) -> float:
+    """Computes 95% confidence interval half-width for a proportion.
+
+    Formula: 1.96 * sqrt(p * (1 - p) / n)
+    """
     return 1.96 * math.sqrt(max(p * (1.0 - p), 1e-9) / max(n, 1.0))
 
 
@@ -207,6 +354,10 @@ def score(
     n_min: float,
     lam: float = 0.55,
 ) -> dict | None:
+    """Scores an item path computing shrunk WR, delta, CI, and U.
+
+    U = delta - lam * CI
+    """
     if games <= 0:
         return None
     wr = wins / games
@@ -232,6 +383,7 @@ def rank_paths(
     n_min: float,
     lam: float = 0.55,
 ) -> list[tuple[str, dict]]:
+    """Ranks all paths at a given depth by U, filtering by n_min."""
     rows: list[tuple[str, dict]] = []
     for path, (games, wins) in agg.items():
         s = score(wins, games, p0, p_avg, alpha, n_min, lam)
@@ -242,6 +394,7 @@ def rank_paths(
 
 
 def champion_sample_n(itemsets: dict) -> float:
+    """Returns total sample size for the champion at item-1 depth."""
     return sum(games for games, _wins in actually_built(itemsets, 1).values())
 
 
@@ -250,6 +403,7 @@ def apply_share_floor(
     total_n: float,
     share: float,
 ) -> list[tuple[str, dict]]:
+    """Filters ranked paths by minimum pick share."""
     if total_n <= 0 or not rows:
         return rows
     floor = share * total_n
@@ -290,6 +444,7 @@ def most_common_extension(
     prefix: str,
     exclude: set[str] | None = None,
 ) -> dict | None:
+    """Finds the most popular next item after a prefix path."""
     exclude = exclude or set()
     best_id = None
     best_n = -1.0
@@ -314,6 +469,7 @@ def most_common_extension(
 
 
 def most_common_sixth(silver: dict, core: str, owned: set[str]) -> dict | None:
+    """Finds the most common 6th item among builds containing a given core."""
     core_ids = core.split("_")
     counts: dict[str, float] = {}
     for path, (games, _wins) in actually_built(silver, 5).items():
@@ -342,6 +498,7 @@ def hierarchical_tilde(
     p0: float,
     alpha: float,
 ) -> float | None:
+    """Computes hierarchical shrinkage estimate combining rank data with a broader prior."""
     if silver is None and prior is None:
         return None
     if silver is None:
@@ -357,12 +514,14 @@ def hierarchical_tilde(
 
 
 def lookup(agg: dict, key: str) -> tuple[float, float] | None:
+    """Looks up a path key in an aggregated dict, returning (games, wins) or None."""
     if key not in agg:
         return None
     return agg[key]
 
 
 def compact_score(s: dict | None) -> dict | None:
+    """Extracts a compact subset of score fields for serialization."""
     if not s:
         return None
     return {
@@ -384,6 +543,7 @@ def score_path(
     n_min: float,
     lam: float = 0.55,
 ) -> dict | None:
+    """Looks up and scores a specific path in an aggregated dict."""
     found = lookup(agg, path)
     if not found:
         return None
@@ -392,6 +552,7 @@ def score_path(
 
 
 def load_history() -> list[dict]:
+    """Loads the daily validation history from the JSONL file."""
     if not HISTORY_PATH.exists():
         return []
     rows = []
@@ -403,18 +564,26 @@ def load_history() -> list[dict]:
     return rows
 
 
-def previous_calendar_entry(history: list[dict], today: str, tier: str | None = None) -> dict | None:
+def previous_calendar_entry(
+    history: list[dict],
+    today: str,
+    tier: str | None = None,
+    champion: str | None = None,
+) -> dict | None:
+    """Finds the most recent history entry before today, optionally filtered by tier/champion."""
     prior = [
         row
         for row in history
         if row.get("date")
         and row["date"] < today
         and (tier is None or row.get("tier") == tier)
+        and (champion is None or row.get("champion", "kaisa") == champion)
     ]
     return prior[-1] if prior else None
 
 
 def verdict_from_delta(delta_u: float | None) -> str:
+    """Maps a delta-U value to a human-readable verdict string."""
     if delta_u is None:
         return "unknown"
     if delta_u <= -0.01:
@@ -427,6 +596,7 @@ def verdict_from_delta(delta_u: float | None) -> str:
 
 
 def compare_metric(label: str, yesterday: dict | None, today: dict | None) -> dict:
+    """Compares a metric between yesterday's and today's score dictionaries."""
     y = compact_score(yesterday) if yesterday else None
     t = compact_score(today) if today else None
     if y is None or t is None or y.get("U") is None or t.get("U") is None:
@@ -460,6 +630,7 @@ def rescore_selection(
     cfg: dict,
     lam: float = 0.55,
 ) -> dict:
+    """Rescores a previous day's selected paths against current data."""
     item1 = selection.get("item1")
     pair = selection.get("pair")
     core = selection.get("core")
@@ -492,6 +663,7 @@ def validate_against_previous(
     today_selection: dict,
     lam: float = 0.55,
 ) -> dict:
+    """Validates today's build against the previous day's snapshot."""
     if previous is None:
         return {
             "status": "waiting",
@@ -524,12 +696,14 @@ def validate_against_previous(
 
 
 def append_history(entry: dict) -> None:
+    """Appends a snapshot entry to the daily history JSONL file."""
     HISTORY_DIR.mkdir(parents=True, exist_ok=True)
     with HISTORY_PATH.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
 
 def load_blacklist() -> dict:
+    """Loads the core blacklist from disk."""
     if not BLACKLIST_PATH.exists():
         return {"cores": []}
     try:
@@ -539,6 +713,7 @@ def load_blacklist() -> dict:
 
 
 def save_blacklist(data: dict) -> None:
+    """Saves the core blacklist to disk."""
     HISTORY_DIR.mkdir(parents=True, exist_ok=True)
     BLACKLIST_PATH.write_text(
         json.dumps(data, indent=2, ensure_ascii=False) + "\n",
@@ -547,6 +722,7 @@ def save_blacklist(data: dict) -> None:
 
 
 def active_blacklist(today: str) -> set[str]:
+    """Returns the set of currently blacklisted core paths."""
     banned: set[str] = set()
     for row in load_blacklist().get("cores") or []:
         core = row.get("core")
@@ -562,6 +738,7 @@ def update_blacklist(
     tier: str,
     cfg: dict,
 ) -> dict | None:
+    """Checks for consecutive faded verdicts and blacklists the core if warranted."""
     streak_n = int(cfg.get("fade_blacklist_streak", 3))
     days = int(cfg.get("fade_blacklist_days", 7))
     compared = [
@@ -615,10 +792,21 @@ def fetch_champion_page(cfg: dict, patch: str | None = None) -> str:
     )
     if patch:
         url += f"&patch={patch}"
-    return http_text(url)
+    try:
+        return http_text(url, timeout=15, referer=url)
+    except Exception:
+        return ""
 
 
 def parse_start_sets(html: str) -> list[tuple[list[str], float, float]]:
+    """Parses starting item sets from Lolalytics HTML using regex.
+
+    Args:
+        html: The HTML content to parse.
+
+    Returns:
+        A list of tuples containing item IDs, game count, and win rate.
+    """
     seen: dict[tuple[str, ...], tuple[list[str], float, float]] = {}
     for match in START_ITEM_RE.finditer(html):
         games = float(match.group(1))
@@ -641,6 +829,19 @@ def choose_start_items(
     lam: float,
     n_min: float,
 ) -> tuple[list[str], dict | None]:
+    """Selects the best starting items by scoring parsed start sets.
+
+    Args:
+        html: The HTML content to parse.
+        p0: Baseline win rate.
+        p_avg: Average win rate.
+        alpha: Smoothing hyperparameter.
+        lam: Regularization hyperparameter.
+        n_min: Minimum games threshold.
+
+    Returns:
+        A tuple of selected item IDs and their score dictionary.
+    """
     best_ids = ["1055", "2003"]
     best_score = None
     for ids, games, wr in parse_start_sets(html):
@@ -742,6 +943,19 @@ def parse_skill_order(
     lam: float,
     n_min: float = 2000,
 ) -> dict | None:
+    """Parses and scores skill level-up orders from HTML.
+
+    Args:
+        html: The HTML content to parse.
+        p0: Baseline win rate.
+        p_avg: Average win rate.
+        alpha: Smoothing hyperparameter.
+        lam: Regularization hyperparameter.
+        n_min: Minimum games threshold.
+
+    Returns:
+        A dictionary with the best skill order and its score, or None.
+    """
     best = None
     for match in SKILL_RE.finditer(html):
         order = match.group(1)
@@ -756,6 +970,14 @@ def parse_skill_order(
 
 
 def parse_runes(html: str) -> dict | None:
+    """Parses the most common rune page from HTML.
+
+    Args:
+        html: The HTML content to parse.
+
+    Returns:
+        A dictionary with rune IDs, names, keystone, and titles, or None.
+    """
     pages: Counter[tuple[str, ...]] = Counter()
     for match in KEYSTONE_PAGE_RE.finditer(html):
         pages[match.groups()] += 1
@@ -778,6 +1000,14 @@ def parse_runes(html: str) -> dict | None:
 
 
 def fetch_counters(cfg: dict) -> dict:
+    """Fetches counter/matchup data from Lolalytics API.
+
+    Args:
+        cfg: Configuration dictionary with request parameters.
+
+    Returns:
+        The JSON response from the API.
+    """
     url = (
         "https://a1.lolalytics.com/mega/?ep=counter&v=1"
         f"&patch={cfg['patch']}&c={cfg['champion']}&lane={cfg['lane']}"
@@ -787,6 +1017,15 @@ def fetch_counters(cfg: dict) -> dict:
 
 
 def champion_tags(cid: int, default_lane: str | None = None) -> set[str]:
+    """Returns archetype tags for a champion ID.
+
+    Args:
+        cid: The champion ID.
+        default_lane: Optional default lane if champion is not hardcoded.
+
+    Returns:
+        A set of tag strings.
+    """
     if cid in CHAMP_TAGS:
         return set(CHAMP_TAGS[cid])
     lane = (default_lane or "").lower()
@@ -802,6 +1041,16 @@ def champion_tags(cid: int, default_lane: str | None = None) -> set[str]:
 
 
 def items_for_tags(tags: set[str], chosen: set[str], limit: int = 3) -> list[str]:
+    """Returns situational item IDs appropriate for given archetype tags.
+
+    Args:
+        tags: Set of archetype tags.
+        chosen: Set of item IDs already chosen.
+        limit: Maximum number of item IDs to return.
+
+    Returns:
+        A list of item IDs.
+    """
     picked: list[str] = []
     for tag in tags:
         for iid in ITEMS_BY_TAG.get(tag, ()):
@@ -820,6 +1069,14 @@ def items_for_tags(tags: set[str], chosen: set[str], limit: int = 3) -> list[str
 
 
 def short_champ_name(name: str) -> str:
+    """Shortens a champion display name for compact branch labels.
+
+    Args:
+        name: The full champion name.
+
+    Returns:
+        A shortened version of the name.
+    """
     cleaned = name.replace("'", "").replace(".", "")
     parts = cleaned.split()
     if len(parts) >= 2:
@@ -934,6 +1191,22 @@ def list_boot_candidates(
     n_min: float = 800,
     limit: int = 4,
 ) -> list[dict]:
+    """Lists and scores boot options compatible with the first two core items.
+
+    Args:
+        items: Dictionary mapping item IDs to names.
+        itemsets: Dictionary of item set frequencies.
+        first_two: Prefix string of the first two item IDs.
+        p0: Baseline win rate.
+        p_avg: Average win rate.
+        alpha: Smoothing hyperparameter.
+        lam: Regularization hyperparameter.
+        n_min: Minimum games threshold.
+        limit: Maximum number of boot candidates to return.
+
+    Returns:
+        A list of dictionaries containing boot IDs and their scores.
+    """
     a, b = first_two.split("_")[:2]
     found: list[dict] = []
     seen: set[str] = set()
@@ -967,6 +1240,25 @@ def list_sixth_candidates(
     lam: float,
     limit: int = 3,
 ) -> list[dict]:
+    """Lists candidate 6th items by iteratively picking the best remaining.
+
+    Args:
+        silver_sets: Dictionary of current patch item set frequencies.
+        prior_sets: Dictionary of previous patch item set frequencies.
+        core: The core item prefix string.
+        item4: The 4th item ID.
+        item5: The 5th item ID.
+        owned: Set of currently owned item IDs.
+        p0: Baseline win rate.
+        p_avg: Average win rate.
+        alpha: Smoothing hyperparameter.
+        n_min: Minimum games threshold.
+        lam: Regularization hyperparameter.
+        limit: Maximum number of candidates to return.
+
+    Returns:
+        A list of dictionaries containing 6th item candidates and their scores.
+    """
     one = pick_sixth_legendary(
         silver_sets, prior_sets, core, item4, item5, owned, p0, p_avg, alpha, n_min, lam
     )
@@ -999,6 +1291,27 @@ def joint_finish(
     lam: float,
     cfg: dict,
 ) -> dict:
+    """Searches over all combinations of boots, items 4-6 to find the best joint finish.
+    
+    This function explores the Cartesian product of the top candidates for boots, 4th, 
+    and 5th items to construct possible late-game paths. For each path, it selects the best
+    6th item and scores the entire finish based on utility sums, returning the optimal combination.
+
+    Args:
+        items: Dictionary mapping item IDs to names.
+        silver: Current patch item sets.
+        prior: Previous patch item sets.
+        core: Core items prefix string.
+        pair: First two items prefix string.
+        p0: Baseline win rate.
+        p_avg: Average win rate.
+        alpha: Smoothing hyperparameter.
+        lam: Regularization hyperparameter.
+        cfg: Configuration dictionary containing minimum game thresholds.
+
+    Returns:
+        A dictionary describing the best joint finish path and its overall score.
+    """
     boots = list_boot_candidates(
         items, silver, pair, p0, p_avg, alpha, lam, float(cfg.get("n_min_boots", 800)), 4
     )
@@ -1097,6 +1410,17 @@ def joint_finish(
 
 
 def compute_hyper_grid(silver: dict, p0: float, p_avg: float, cfg: dict) -> dict:
+    """Evaluates the top core across a grid of (alpha, lambda) hyperparameters.
+
+    Args:
+        silver: Dictionary of item set frequencies.
+        p0: Baseline win rate.
+        p_avg: Average win rate.
+        cfg: Configuration dictionary with minimum core threshold.
+
+    Returns:
+        A dictionary mapping hyperparameter combinations to their best core.
+    """
     cores = actually_built(silver, 3)
     out = {}
     for alpha, lam in HYPER_GRID:
@@ -1120,6 +1444,16 @@ def consensus_hyperparams(
     default_a: float,
     default_l: float,
 ) -> tuple[float, float, dict]:
+    """Selects hyperparameters by modal-core consensus across the grid.
+
+    Args:
+        grid: Dictionary from compute_hyper_grid.
+        default_a: Default alpha value.
+        default_l: Default lambda value.
+
+    Returns:
+        A tuple of chosen alpha, lambda, and metadata dict.
+    """
     if not grid:
         return default_a, default_l, {
             "status": "default",
@@ -1169,6 +1503,20 @@ def select_hyperparams(
     cfg: dict,
     grid: dict,
 ) -> tuple[float, float, dict]:
+    """Selects alpha and lambda using holdout validation or grid consensus.
+
+    Args:
+        history: List of historical run dictionaries.
+        today: Current date string.
+        silver: Current item sets.
+        p0: Baseline win rate.
+        p_avg: Average win rate.
+        cfg: Configuration dictionary.
+        grid: Evaluated hyperparameter grid.
+
+    Returns:
+        A tuple of selected alpha, lambda, and metadata dict.
+    """
     default_a = float(cfg.get("alpha_rank", 800))
     default_l = float(cfg.get("lambda_risk", 0.55))
     prev = previous_calendar_entry(history, today, cfg.get("tier"))
@@ -1206,6 +1554,19 @@ def choose_boots(
     p_avg: float,
     alpha: float,
 ) -> str:
+    """Legacy boot selection: picks the highest-U boots for a given first-two pair.
+
+    Args:
+        items: Dictionary mapping item IDs to names.
+        itemsets: Dictionary of item set frequencies.
+        first_two: Prefix string of the first two item IDs.
+        p0: Baseline win rate.
+        p_avg: Average win rate.
+        alpha: Smoothing hyperparameter.
+
+    Returns:
+        The selected boot item ID string.
+    """
     a, b = first_two.split("_")[:2]
     boot3 = actually_built(itemsets, 3, boot=True)
     best_id = "3006"
@@ -1227,6 +1588,18 @@ def choose_boots(
 
 
 def late_utility(tilde: float, games: float, p_avg: float, alpha: float, lam: float = 0.55) -> float:
+    """Computes U for a late item given its hierarchical tilde estimate.
+
+    Args:
+        tilde: Hierarchical win rate estimate.
+        games: Number of games.
+        p_avg: Average win rate.
+        alpha: Smoothing hyperparameter.
+        lam: Regularization hyperparameter.
+
+    Returns:
+        The late utility score.
+    """
     return (tilde - p_avg) - lam * ci95(tilde, games + alpha)
 
 
@@ -1242,6 +1615,23 @@ def list_late_items(
     lam: float = 0.55,
     limit: int = 1,
 ) -> list[dict]:
+    """Lists and ranks late items extending a prefix path using hierarchical tilde.
+
+    Args:
+        silver_agg: Current patch aggregated items.
+        prior_agg: Previous patch aggregated items.
+        prefix: Prefix string of already built items.
+        p0: Baseline win rate.
+        p_avg: Average win rate.
+        alpha: Smoothing hyperparameter.
+        n_min: Minimum games threshold.
+        exclude: Set of item IDs to exclude.
+        lam: Regularization hyperparameter.
+        limit: Maximum number of items to return.
+
+    Returns:
+        A list of dictionaries with item IDs and scores.
+    """
     exclude = exclude or set()
     found: list[dict] = []
     for path, (games, wins) in silver_agg.items():
@@ -1278,6 +1668,22 @@ def pick_late_item(
     exclude: set[str] | None = None,
     lam: float = 0.55,
 ) -> dict | None:
+    """Picks the single best late item extending a prefix path.
+
+    Args:
+        silver_agg: Current patch aggregated items.
+        prior_agg: Previous patch aggregated items.
+        prefix: Prefix string of already built items.
+        p0: Baseline win rate.
+        p_avg: Average win rate.
+        alpha: Smoothing hyperparameter.
+        n_min: Minimum games threshold.
+        exclude: Set of item IDs to exclude.
+        lam: Regularization hyperparameter.
+
+    Returns:
+        A dictionary with the chosen item ID and score, or None.
+    """
     rows = list_late_items(
         silver_agg, prior_agg, prefix, p0, p_avg, alpha, n_min, exclude, lam, 1
     )
@@ -1294,6 +1700,21 @@ def choose_late_items(
     n_min4: float,
     n_min5: float,
 ) -> tuple[dict | None, dict | None]:
+    """Selects items 4 and 5 sequentially after the core.
+
+    Args:
+        silver_sets: Current patch item sets.
+        prior_sets: Previous patch item sets.
+        core: The core items prefix string.
+        p0: Baseline win rate.
+        p_avg: Average win rate.
+        alpha: Smoothing hyperparameter.
+        n_min4: Minimum games threshold for 4th item.
+        n_min5: Minimum games threshold for 5th item.
+
+    Returns:
+        A tuple of the chosen 4th and 5th items as dicts, or Nones.
+    """
     item4 = pick_late_item(
         actually_built(silver_sets, 4),
         actually_built(prior_sets, 4),
@@ -1331,6 +1752,24 @@ def pick_sixth_legendary(
     n_min: float,
     lam: float = 0.55,
 ) -> dict | None:
+    """Picks the 6th legendary item using exact data or late-presence fallback.
+
+    Args:
+        silver_sets: Current patch item sets.
+        prior_sets: Previous patch item sets.
+        core: The core items prefix string.
+        item4: The 4th item ID string.
+        item5: The 5th item ID string.
+        owned: Set of currently owned item IDs.
+        p0: Baseline win rate.
+        p_avg: Average win rate.
+        alpha: Smoothing hyperparameter.
+        n_min: Minimum games threshold.
+        lam: Regularization hyperparameter.
+
+    Returns:
+        A dictionary containing the chosen 6th item and its score, or None.
+    """
     prefix5 = f"{core}_{item4}_{item5}"
     exact = pick_late_item(
         actually_built(silver_sets, 6),
@@ -1399,6 +1838,20 @@ def pick_sixth_legendary(
 
 
 def build_decision(cfg: dict, items: dict[int, str]) -> tuple[dict, dict, float, float, float]:
+    """Main decision pipeline: fetches data, scores paths, selects the full 7-slot build.
+    
+    This function orchestrates the entire build generation process. It fetches live data, 
+    evaluates hyperparameter grids to find optimal regularization, and incrementally scores
+    build paths from item 1 to 6 (plus boots) to output the best joint build.
+
+    Args:
+        cfg: Configuration dictionary containing thresholds and parameters.
+        items: Dictionary mapping item IDs to names.
+
+    Returns:
+        A tuple containing the final run dictionary, live build decisions, 
+        and values for alpha, lambda, and p0.
+    """
     html = fetch_champion_page(cfg)
     cfg["patch"] = resolve_live_patch(cfg)
     print(f"Fetching {cfg['tier'].title()} {cfg['region'].upper()} item sets...")
@@ -1677,14 +2130,13 @@ def build_decision(cfg: dict, items: dict[int, str]) -> tuple[dict, dict, float,
     return decision, silver, p0, p_avg, alpha
 
 
-GEM_SLOT_KEYS = ("markov-kaisa-gem-1", "markov-kaisa-gem-2")
-
-
-def gem_uid(slot: int) -> str:
-    return str(uuid.uuid5(uuid.NAMESPACE_URL, GEM_SLOT_KEYS[slot - 1]))
+def gem_uid(slot: int, champ_slug: str = "kaisa") -> str:
+    """Generates a deterministic UUID for a gem hunter item set slot."""
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"markov-{champ_slug}-gem-{slot}"))
 
 
 def core_identity(path: str) -> frozenset[str]:
+    """Returns a frozenset of item IDs from a path, ignoring order."""
     return frozenset(path.split("_"))
 
 
@@ -1701,6 +2153,7 @@ def gem_search_config(cfg: dict) -> dict:
 
 
 def gem_set_title(wr: float, used: set[str] | None = None) -> str:
+    """Generates a unique title for a Gem Hunter item set based on winrate."""
     used = used if used is not None else set()
     pct = int(round((wr or 0.0) * 100.0))
     title = f"Gem Hunter {pct}%"
@@ -1711,6 +2164,7 @@ def gem_set_title(wr: float, used: set[str] | None = None) -> str:
 
 
 def buy_plan(core: str, finished: dict) -> tuple[list[str], list[str]]:
+    """Builds the 7-slot buy order and situational items from a core + finished dict."""
     core_ids = core.split("_")
     buy_order = [
         core_ids[0],
@@ -1748,10 +2202,11 @@ def compact_path_decision(
     gem_score: float,
     lam: float,
 ) -> dict:
+    """Builds a compact decision dict for a gem path (mirrors the main decision format)."""
     buy_ids, situ_ids = buy_plan(core, finished)
     return {
         "set_title": title,
-        "set_uid_key": GEM_SLOT_KEYS[slot - 1],
+        "set_uid_key": f"markov-kaisa-gem-{slot}",
         "slot": slot,
         "gem": {
             "G": gem_score,
@@ -1848,6 +2303,7 @@ def score_gem_path(
     lam: float,
     n_min: float,
 ) -> dict | None:
+    """Scores a core path for Gem Hunter using hierarchical tilde from a thicker prior."""
     silver_row = lookup(silver3, path)
     prior_row = lookup(prior3, path)
     n_s = silver_row[0] if silver_row else 0.0
@@ -1887,6 +2343,7 @@ def rank_gem_cores(
     exclude: set[frozenset[str]],
     default_item1: str,
 ) -> list[tuple[str, dict, float, float]]:
+    """Ranks all candidate gem cores by G = U + rarity bonus, excluding the default core."""
     n_min = float(cfg["n_min_core"])
     min_share = float(cfg.get("gem_min_pick_share", 0.0004))
     max_share = float(cfg.get("gem_max_pick_share", 0.12))
@@ -1969,6 +2426,7 @@ def hunt_gem_paths(
     total_n: float,
     weak_rows: list[dict],
 ) -> list[dict]:
+    """Main Gem Hunter pipeline: finds and builds two underpicked alternative item sets."""
     lam_gem = lam * float(cfg.get("gem_lambda_scale", 0.65))
     alpha_gem = max(80.0, alpha * float(cfg.get("gem_alpha_scale", 0.25)))
     print("Fetching gem prior (thicker sample for underpicked cores)...")
@@ -2051,9 +2509,10 @@ def make_itemset(
     cfg: dict,
     decision: dict,
     title: str | None = None,
-    uid_key: str = "markov-kaisa-itemset",
+    uid_key: str | None = None,
     sortrank: int = 0,
 ) -> dict:
+    """Constructs a League client item set JSON payload from a decision dict."""
     def block(block_title: str, ids: list[str]) -> dict:
         return {
             "type": block_title,
@@ -2062,6 +2521,8 @@ def make_itemset(
             "items": [{"id": item_id, "count": 1} for item_id in ids],
         }
 
+    champ_slug = cfg.get("champion", "kaisa")
+    actual_uid_key = uid_key or f"markov-{champ_slug}-itemset"
     buy_ids = [row["id"] for row in decision["buy_order"]]
     start_ids = [row["id"] for row in decision["start"]]
     situ_ids = [row["id"] for row in decision["situational"]]
@@ -2083,7 +2544,7 @@ def make_itemset(
         "mode": "any",
         "sortrank": sortrank,
         "startedFrom": "blank",
-        "uid": str(uuid.uuid5(uuid.NAMESPACE_URL, uid_key)),
+        "uid": str(uuid.uuid5(uuid.NAMESPACE_URL, actual_uid_key)),
         "associatedChampions": [cfg["champion_id"]],
         "associatedMaps": cfg["associated_maps"],
         "preferredItemSlots": [],
@@ -2092,6 +2553,7 @@ def make_itemset(
 
 
 def league_client_running() -> bool:
+    """Checks if the League client process is currently running."""
     try:
         import subprocess
 
@@ -2107,6 +2569,7 @@ def league_client_running() -> bool:
 
 
 def upsert_client_index(cfg: dict, itemset: dict) -> Path:
+    """Inserts or updates an item set in the client's ItemSets.json index."""
     index_path = Path(cfg["itemsets_index"])
     if index_path.exists():
         backup = index_path.with_suffix(".json.bak")
@@ -2132,11 +2595,13 @@ def upsert_client_index(cfg: dict, itemset: dict) -> Path:
 
 
 def write_json(path: Path, payload: dict) -> None:
+    """Writes a dict as formatted JSON to a file path."""
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
 def prune_stale_recommended(cfg: dict, itemset: dict, keep_name: str | None = None) -> list[Path]:
+    """Removes old item set files that match the current set's UID or title."""
     dest_dir = Path(cfg["itemset_dir"])
     keep = {Path(cfg["itemset_filename"]).name, "RIOT_ItemSet_GemHunter_1.json", "RIOT_ItemSet_GemHunter_2.json"}
     if keep_name:
@@ -2164,6 +2629,7 @@ def install_itemset(
     itemset: dict,
     filename: str | None = None,
 ) -> tuple[Path, Path]:
+    """Writes an item set file and upserts it into the client index."""
     dest_dir = Path(cfg["itemset_dir"])
     dest_dir.mkdir(parents=True, exist_ok=True)
     dest = dest_dir / (filename or cfg["itemset_filename"])
@@ -2176,6 +2642,7 @@ def install_itemset(
 
 
 def drop_itemsets(cfg: dict, uids: set[str]) -> None:
+    """Removes item sets by UID from both the index and champion directory."""
     if not uids:
         return
     index_path = Path(cfg["itemsets_index"])
@@ -2204,6 +2671,7 @@ def drop_itemsets(cfg: dict, uids: set[str]) -> None:
 
 
 def print_summary(cfg: dict, decision: dict, dest: Path, index_path: Path) -> None:
+    """Prints a formatted summary of the build decision to stdout."""
     print()
     print("=" * 64)
     print(f"  {cfg['build_title']}")
@@ -2293,14 +2761,15 @@ def print_summary(cfg: dict, decision: dict, dest: Path, index_path: Path) -> No
                 "    buy: "
                 + " -> ".join(row["name"] for row in gem.get("buy_order") or [])
             )
+    champ_name = cfg.get("champion_name") or cfg.get("champion", "Kai'Sa").title()
     print(f"\nChampion file:\n  {dest}")
     print(f"Client index:\n  {index_path}")
     if league_client_running():
         print("\nLeague is open. Close the client completely, then reopen it.")
         print("Otherwise the client may overwrite ItemSets.json on exit.")
     else:
-        print("\nOpen League and select Kai'Sa. The sets appear under Item Sets.")
-        print("Markov Kai'Sa is the U path. Gem Hunter sets are named by core winrate.")
+        print(f"\nOpen League and select {champ_name}. The sets appear under Item Sets.")
+        print(f"{cfg['build_title']} is the U path. Gem Hunter sets are named by core winrate.")
 
 
 LOLALYTICS_TIERS = (
@@ -2332,6 +2801,81 @@ def prior_for_tier(tier: str) -> tuple[str, str]:
     if name in {"diamond", "emerald_plus", "diamond_plus"}:
         return "master", "all"
     return "all", "all"
+
+
+def pick_champion_menu(default: str = "kaisa", out_path: Path | None = None) -> str | None:
+    """Interactive up/down champion picker for the Windows launcher."""
+    champions = ["kaisa", "tristana"]
+    normalized = normalize_champion(default)
+    try:
+        idx = champions.index(normalized)
+    except ValueError:
+        idx = 0
+
+    labels = {
+        "kaisa": "Kai'Sa  (default)",
+        "tristana": "Tristana",
+    }
+    coral_bg = "\033[48;2;232;90;60m"
+    ink = "\033[38;2;26;26;26m"
+    coral = "\033[38;2;232;90;60m"
+    dim = "\033[38;2;120;112;100m"
+    reset = "\033[0m"
+    header = "  Up / Down  =  move     Enter  =  pick     Esc  =  cancel"
+    menu_lines = 4 + len(champions)
+    stream = sys.stdout
+
+    def draw() -> None:
+        stream.write(f"\n{coral}  pick a champion brick{reset}\n")
+        stream.write(f"{dim}{header}{reset}\n\n")
+        for i, c in enumerate(champions):
+            name = f"{labels.get(c, c):<22}"
+            if i == idx:
+                stream.write(f"  {coral_bg}{ink}  #  {name}{reset}\n")
+            else:
+                stream.write(f"  {dim}  .  {name}{reset}\n")
+        stream.flush()
+
+    def commit(chosen: str | None) -> str | None:
+        if chosen and out_path is not None:
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            out_path.write_text(chosen + "\n", encoding="utf-8")
+        return chosen
+
+    if not sys.stdin.isatty():
+        print(normalized)
+        return commit(normalized)
+
+    try:
+        import msvcrt
+    except ImportError:
+        print(normalized)
+        return commit(normalized)
+
+    first = True
+    while True:
+        if not first:
+            stream.write(f"\033[{menu_lines}A")
+        first = False
+        draw()
+
+        key = msvcrt.getch()
+        if key in (b"\x00", b"\xe0"):
+            arrow = msvcrt.getch()
+            if arrow == b"H":
+                idx = (idx - 1) % len(champions)
+            elif arrow == b"P":
+                idx = (idx + 1) % len(champions)
+            continue
+        if key in (b"\r", b"\n"):
+            chosen = champions[idx]
+            stream.write(f"\n  {coral}#{reset}  selected  {labels.get(chosen, chosen)}\n")
+            stream.flush()
+            return commit(chosen)
+        if key == b"\x1b":
+            stream.write("\n  Cancelled.\n")
+            stream.flush()
+            return commit(None)
 
 
 def pick_tier_menu(default: str = "silver", out_path: Path | None = None) -> str | None:
@@ -2423,7 +2967,20 @@ def pick_tier_menu(default: str = "silver", out_path: Path | None = None) -> str
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Generate the Markov Kai'Sa item set.")
+    """Parses command-line arguments."""
+    parser = argparse.ArgumentParser(description="Generate the Markov champion item set.")
+    parser.add_argument(
+        "--champion",
+        "--champ",
+        default=None,
+        help="Champion to build for (e.g. kaisa, tristana). Default is kaisa.",
+    )
+    parser.add_argument(
+        "--pick-champion",
+        "--pick-champ",
+        action="store_true",
+        help="Interactive up/down menu; writes the chosen champion for RUN.bat.",
+    )
     parser.add_argument(
         "--tier",
         choices=LOLALYTICS_TIERS,
@@ -2439,14 +2996,27 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> int:
+    """Entry point: loads config, runs the decision pipeline, installs item sets."""
     cfg = load_config()
     args = parse_args()
+    if args.pick_champion:
+        chosen = pick_champion_menu(
+            str(cfg.get("champion") or "kaisa"),
+            out_path=OUTPUT_DIR / "selected_champion.txt",
+        )
+        return 0 if chosen else 1
     if args.pick_tier:
         chosen = pick_tier_menu(
             str(cfg.get("tier") or "silver"),
             out_path=OUTPUT_DIR / "selected_rank.txt",
         )
         return 0 if chosen else 1
+    if args.champion:
+        cfg = apply_champion(cfg, args.champion)
+        print(f"Champion override from launcher: {cfg['champion_name']} ({cfg['champion']})")
+    else:
+        cfg = apply_champion(cfg)
+
     if args.tier:
         cfg["tier"] = args.tier
         print(f"Rank override from launcher: {args.tier}")
@@ -2457,6 +3027,7 @@ def main() -> int:
         decision, silver, p0, p_avg, alpha = build_decision(cfg, items)
         today = date.today().isoformat()
         selection = {
+            "champion": cfg["champion"],
             "item1": decision["item1"]["id"],
             "pair": decision["item2"]["path"],
             "core": decision["core"]["path"],
@@ -2473,7 +3044,7 @@ def main() -> int:
             "core": compact_score(decision["core"]),
         }
         history = load_history()
-        previous = previous_calendar_entry(history, today, cfg.get("tier"))
+        previous = previous_calendar_entry(history, today, cfg.get("tier"), champion=cfg["champion"])
         lam = float((decision.get("context") or {}).get("lambda") or cfg.get("lambda_risk", 0.55))
         validation = validate_against_previous(
             previous, silver, p0, p_avg, alpha, cfg, selection, lam
@@ -2484,6 +3055,7 @@ def main() -> int:
             + [
                 {
                     "date": today,
+                    "champion": cfg["champion"],
                     "tier": cfg["tier"],
                     "selection": selection,
                     "validation": validation,
@@ -2498,6 +3070,7 @@ def main() -> int:
             print(f"Blacklisted faded core until {bl['until']}: {bl['core']}")
         snapshot = {
             "date": today,
+            "champion": cfg["champion"],
             "generated_at": decision["generated_at"],
             "patch": cfg["patch"],
             "tier": cfg["tier"],
@@ -2515,13 +3088,14 @@ def main() -> int:
         write_json(OUTPUT_DIR / "validation.json", validation)
         write_json(OUTPUT_DIR / cfg["itemset_filename"], itemset)
         gem_itemsets: list[tuple[dict, str]] = []
+        champ_slug = cfg["champion"]
         for gem in decision.get("gems") or []:
             slot = int(gem.get("slot") or (len(gem_itemsets) + 1))
             gem_set = make_itemset(
                 cfg,
                 gem,
                 title=gem["set_title"],
-                uid_key=gem["set_uid_key"],
+                uid_key=f"markov-{champ_slug}-gem-{slot}",
                 sortrank=slot,
             )
             filename = f"RIOT_ItemSet_GemHunter_{slot}.json"
@@ -2533,7 +3107,7 @@ def main() -> int:
             _gem_dest, index_path = install_itemset(cfg, gem_set, filename=filename)
             print(f"Installed {gem_set['title']}")
         used_uids = {row[0]["uid"] for row in gem_itemsets}
-        stale_gem_uids = {gem_uid(slot) for slot in (1, 2)} - used_uids
+        stale_gem_uids = {gem_uid(slot, champ_slug) for slot in (1, 2)} - used_uids
         drop_itemsets(cfg, stale_gem_uids)
         print_summary(cfg, decision, dest, index_path)
         return 0
