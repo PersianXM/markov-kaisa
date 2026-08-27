@@ -43,6 +43,14 @@ pause >nul
 exit /b 1
 
 :have_py
+set "CHAMPFILE=%~dp0output\selected_champion.txt"
+if exist "%CHAMPFILE%" del "%CHAMPFILE%" >nul 2>nul
+%PY% markov_kaisa.py --pick-champ
+if errorlevel 1 goto :cancelled
+if not exist "%CHAMPFILE%" goto :no_champ
+set /p CHAMP=<"%CHAMPFILE%"
+if not defined CHAMP goto :no_champ
+
 set "RANKFILE=%~dp0output\selected_rank.txt"
 if exist "%RANKFILE%" del "%RANKFILE%" >nul 2>nul
 %PY% markov_kaisa.py --pick-tier
@@ -59,6 +67,13 @@ echo   %CT%Press any key to close...%RST%
 pause >nul
 exit /b 1
 
+:no_champ
+echo   %ER%[X]  Champion was not selected.%RST%
+echo.
+echo   %CT%Press any key to close...%RST%
+pause >nul
+exit /b 1
+
 :no_rank
 echo   %ER%[X]  Rank was not selected.%RST%
 echo.
@@ -69,6 +84,7 @@ exit /b 1
 :run_build
 echo.
 echo   %DT%# # #     # #%RST%
+echo   %CB% %RST%  %WT%CHAMPION%RST%    %CT%%CHAMP%%RST%
 echo   %CB% %RST%  %WT%RANK%RST%        %CT%%RANK%%RST%
 echo   %IB% %RST%  %WT%FETCH%RST%       live Lolalytics
 echo   %CB% %RST%  %WT%SCORE%RST%       Markov U protocol
@@ -78,14 +94,14 @@ echo   %CB% %RST%  %WT%INSTALL%RST%     three League item sets
 echo   %DT%#     # # #%RST%
 echo.
 
-%PY% markov_kaisa.py --tier %RANK%
+%PY% markov_kaisa.py --champion %CHAMP% --tier %RANK%
 set "ERR=%errorlevel%"
 echo.
 
 if not "%ERR%"=="0" goto :fail
 echo   %CB%  %RST% %CB%  %RST% %CB%  %RST%
-echo   %OK%[OK]%RST%  %WT%Markov KaiSa plus two Gem Hunter sets are in the client.%RST%
-echo   %DT%Close League fully, reopen, select KaiSa, open Item Sets.%RST%
+echo   %OK%[OK]%RST%  %WT%Markov build plus two Gem Hunter sets are in the client.%RST%
+echo   %DT%Close League fully, reopen, select champion, open Item Sets.%RST%
 goto :done
 
 :fail

@@ -4,10 +4,12 @@
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
 import math
 import re
 import sys
+import time
 import urllib.request
 import uuid
 from collections import Counter
@@ -20,58 +22,169 @@ OUTPUT_DIR = ROOT / "output"
 HISTORY_DIR = ROOT / "history"
 HISTORY_PATH = HISTORY_DIR / "daily.jsonl"
 BLACKLIST_PATH = HISTORY_DIR / "blacklist.json"
-DDRAGON_TIMEOUT = 25
-LOL_TIMEOUT = 45
+DDRAGON_TIMEOUT = 10
+LOL_TIMEOUT = 12
 UA = {
-    "User-Agent": "MarkovKaisa/1.0",
-    "Referer": "https://lolalytics.com/lol/kaisa/build/",
+    "User-Agent": "MarkovLeague/1.0",
     "Origin": "https://lolalytics.com",
     "Accept": "application/json,text/html,*/*",
 }
+
+SUPPORTED_CHAMPIONS: dict[str, dict] = {
+    "kaisa": {
+        "slug": "kaisa",
+        "name": "Kai'Sa",
+        "id": 145,
+        "folder": "Kaisa",
+        "title": "Markov Kai'Sa",
+        "lane": "bottom",
+    },
+    "tristana": {
+        "slug": "tristana",
+        "name": "Tristana",
+        "id": 18,
+        "folder": "Tristana",
+        "title": "Markov Tristana",
+        "lane": "bottom",
+    },
+}
+
+CHAMPION_ALIASES: dict[str, str] = {
+    "kaisa": "kaisa",
+    "kai'sa": "kaisa",
+    "kais": "kaisa",
+    "tristana": "tristana",
+    "tristina": "tristana",
+    "trist": "tristana",
+}
+
+
+def normalize_champion(name: str | None) -> str:
+    if not name:
+        return "kaisa"
+    cleaned = re.sub(r"[^a-z0-9]", "", str(name).strip().lower())
+    return CHAMPION_ALIASES.get(cleaned, CHAMPION_ALIASES.get(str(name).strip().lower(), "kaisa"))
+
+
+def apply_champion(cfg: dict, champ_input: str | None = None) -> dict:
+    slug = normalize_champion(champ_input or cfg.get("champion") or "kaisa")
+    meta = SUPPORTED_CHAMPIONS.get(slug, SUPPORTED_CHAMPIONS["kaisa"])
+    cfg["champion"] = meta["slug"]
+    cfg["champion_name"] = meta["name"]
+    cfg["champion_id"] = meta["id"]
+    cfg["build_title"] = meta["title"]
+    if "lane" not in cfg or not cfg["lane"]:
+        cfg["lane"] = meta["lane"]
+    if cfg.get("league_root"):
+        cfg["itemset_dir"] = str(
+            Path(cfg["league_root"]) / "Config" / "Champions" / meta["folder"] / "Recommended"
+        )
+    return cfg
 
 
 def load_config() -> dict:
     return json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
 
 
-def http_bytes(url: str, timeout: int = LOL_TIMEOUT) -> bytes:
-    req = urllib.request.Request(url, headers=UA)
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return resp.read()
+def http_bytes(url: str, timeout: int = LOL_TIMEOUT, referer: str | None = None) -> bytes:
+    if "ddragon.leagueoflegends.com" in url:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+            "Accept": "application/json,text/html,*/*",
+        }
+    else:
+        headers = dict(UA)
+        headers["Referer"] = referer or "https://lolalytics.com/"
+    req = urllib.request.Request(url, headers=headers)
+    last_err = None
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return resp.read()
+        except Exception as exc:
+            last_err = exc
+            time.sleep(0.5)
+    raise last_err or RuntimeError(f"Failed to fetch {url}")
 
 
-def http_json(url: str, timeout: int = LOL_TIMEOUT) -> dict:
-    return json.loads(http_bytes(url, timeout=timeout).decode("utf-8", "ignore"))
+def http_json(url: str, timeout: int = LOL_TIMEOUT, referer: str | None = None) -> dict:
+    return json.loads(http_bytes(url, timeout=timeout, referer=referer).decode("utf-8", "ignore"))
 
 
-def http_text(url: str, timeout: int = LOL_TIMEOUT) -> str:
-    return http_bytes(url, timeout=timeout).decode("utf-8", "ignore")
+def http_text(url: str, timeout: int = LOL_TIMEOUT, referer: str | None = None) -> str:
+    return http_bytes(url, timeout=timeout, referer=referer).decode("utf-8", "ignore")
+
+
+_ITEMS_CACHE: dict[int, str] | None = None
+_CHAMPIONS_CACHE: dict[int, str] | None = None
 
 
 def load_items() -> dict[int, str]:
-    versions = http_json(
-        "https://ddragon.leagueoflegends.com/api/versions.json",
-        timeout=DDRAGON_TIMEOUT,
-    )
-    ver = versions[0]
-    data = http_json(
-        f"https://ddragon.leagueoflegends.com/cdn/{ver}/data/en_US/item.json",
-        timeout=DDRAGON_TIMEOUT,
-    )["data"]
-    return {int(k): v["name"] for k, v in data.items()}
+    global _ITEMS_CACHE
+    if _ITEMS_CACHE is not None:
+        return _ITEMS_CACHE
+    cache_file = OUTPUT_DIR / "cache_items.json"
+    if cache_file.exists():
+        try:
+            data = json.loads(cache_file.read_text(encoding="utf-8"))
+            _ITEMS_CACHE = {int(k): str(v) for k, v in data.items()}
+            return _ITEMS_CACHE
+        except Exception:
+            pass
+    try:
+        versions = http_json(
+            "https://ddragon.leagueoflegends.com/api/versions.json",
+            timeout=10,
+        )
+        for ver in versions[:3]:
+            try:
+                data = http_json(
+                    f"https://ddragon.leagueoflegends.com/cdn/{ver}/data/en_US/item.json",
+                    timeout=20,
+                )["data"]
+                _ITEMS_CACHE = {int(k): v["name"] for k, v in data.items()}
+                cache_file.parent.mkdir(parents=True, exist_ok=True)
+                cache_file.write_text(json.dumps(_ITEMS_CACHE, ensure_ascii=False), encoding="utf-8")
+                return _ITEMS_CACHE
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return {}
 
 
 def load_champions() -> dict[int, str]:
-    versions = http_json(
-        "https://ddragon.leagueoflegends.com/api/versions.json",
-        timeout=DDRAGON_TIMEOUT,
-    )
-    ver = versions[0]
-    data = http_json(
-        f"https://ddragon.leagueoflegends.com/cdn/{ver}/data/en_US/champion.json",
-        timeout=DDRAGON_TIMEOUT,
-    )["data"]
-    return {int(v["key"]): v["name"] for v in data.values()}
+    global _CHAMPIONS_CACHE
+    if _CHAMPIONS_CACHE is not None:
+        return _CHAMPIONS_CACHE
+    cache_file = OUTPUT_DIR / "cache_champions.json"
+    if cache_file.exists():
+        try:
+            data = json.loads(cache_file.read_text(encoding="utf-8"))
+            _CHAMPIONS_CACHE = {int(k): str(v) for k, v in data.items()}
+            return _CHAMPIONS_CACHE
+        except Exception:
+            pass
+    try:
+        versions = http_json(
+            "https://ddragon.leagueoflegends.com/api/versions.json",
+            timeout=10,
+        )
+        for ver in versions[:3]:
+            try:
+                data = http_json(
+                    f"https://ddragon.leagueoflegends.com/cdn/{ver}/data/en_US/champion.json",
+                    timeout=20,
+                )["data"]
+                _CHAMPIONS_CACHE = {int(v["key"]): v["name"] for v in data.values()}
+                cache_file.parent.mkdir(parents=True, exist_ok=True)
+                cache_file.write_text(json.dumps(_CHAMPIONS_CACHE, ensure_ascii=False), encoding="utf-8")
+                return _CHAMPIONS_CACHE
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return {145: "Kai'Sa", 18: "Tristana"}
 
 
 def item_name(items: dict[int, str], item_id: str) -> str:
@@ -112,18 +225,21 @@ def resolve_live_patch(cfg: dict) -> str:
         f"https://lolalytics.com/lol/{cfg['champion']}/build/"
         f"?tier={cfg['tier']}&region={cfg['region']}&lane={cfg['lane']}"
     )
-    html = http_text(url)
-    match = re.search(
-        r'kaisa_[^"]*?_(\d+\.\d+)(?:_|")',
-        html,
-        re.I,
-    )
-    if not match:
-        match = re.search(r"Patch(?:</[^>]+>)?\s*(\d+\.\d+)", html, re.I)
-    if match:
-        patch = match.group(1)
-        print(f"Live patch from Lolalytics: {patch}")
-        return patch
+    try:
+        html = http_text(url, timeout=12, referer=url)
+        match = re.search(
+            rf"{cfg['champion']}_[^\"]*?_(\d+\.\d+)(?:_|\")",
+            html,
+            re.I,
+        )
+        if not match:
+            match = re.search(r"Patch(?:</[^>]+>)?\s*(\d+\.\d+)", html, re.I)
+        if match:
+            patch = match.group(1)
+            print(f"Live patch from Lolalytics: {patch}")
+            return patch
+    except Exception:
+        pass
 
     patch = ddragon_patch()
     print(f"Live patch from Data Dragon: {patch}")
@@ -148,15 +264,18 @@ def fetch_baseline(cfg: dict) -> tuple[float, float]:
         f"?tier={cfg['tier']}&region={cfg['region']}"
         f"&lane={cfg['lane']}&patch={cfg['patch']}"
     )
-    html = http_text(url)
     p0 = 0.50
     p_avg = 0.50
-    m = re.search(r"has a (\d+\.\d+)% win rate", html)
-    if m:
-        p0 = float(m.group(1)) / 100.0
-    m = re.search(r"Average[^\d]{0,80}(\d+\.\d+)%", html)
-    if m:
-        p_avg = float(m.group(1)) / 100.0
+    try:
+        html = http_text(url, timeout=12, referer=url)
+        m = re.search(r"has a (\d+\.\d+)% win rate", html)
+        if m:
+            p0 = float(m.group(1)) / 100.0
+        m = re.search(r"Average[^\d]{0,80}(\d+\.\d+)%", html)
+        if m:
+            p_avg = float(m.group(1)) / 100.0
+    except Exception:
+        pass
     return p0, p_avg
 
 
@@ -403,13 +522,19 @@ def load_history() -> list[dict]:
     return rows
 
 
-def previous_calendar_entry(history: list[dict], today: str, tier: str | None = None) -> dict | None:
+def previous_calendar_entry(
+    history: list[dict],
+    today: str,
+    tier: str | None = None,
+    champion: str | None = None,
+) -> dict | None:
     prior = [
         row
         for row in history
         if row.get("date")
         and row["date"] < today
         and (tier is None or row.get("tier") == tier)
+        and (champion is None or row.get("champion", "kaisa") == champion)
     ]
     return prior[-1] if prior else None
 
@@ -615,7 +740,10 @@ def fetch_champion_page(cfg: dict, patch: str | None = None) -> str:
     )
     if patch:
         url += f"&patch={patch}"
-    return http_text(url)
+    try:
+        return http_text(url, timeout=15, referer=url)
+    except Exception:
+        return ""
 
 
 def parse_start_sets(html: str) -> list[tuple[list[str], float, float]]:
@@ -1677,11 +1805,8 @@ def build_decision(cfg: dict, items: dict[int, str]) -> tuple[dict, dict, float,
     return decision, silver, p0, p_avg, alpha
 
 
-GEM_SLOT_KEYS = ("markov-kaisa-gem-1", "markov-kaisa-gem-2")
-
-
-def gem_uid(slot: int) -> str:
-    return str(uuid.uuid5(uuid.NAMESPACE_URL, GEM_SLOT_KEYS[slot - 1]))
+def gem_uid(slot: int, champ_slug: str = "kaisa") -> str:
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"markov-{champ_slug}-gem-{slot}"))
 
 
 def core_identity(path: str) -> frozenset[str]:
@@ -1751,7 +1876,7 @@ def compact_path_decision(
     buy_ids, situ_ids = buy_plan(core, finished)
     return {
         "set_title": title,
-        "set_uid_key": GEM_SLOT_KEYS[slot - 1],
+        "set_uid_key": f"markov-kaisa-gem-{slot}",
         "slot": slot,
         "gem": {
             "G": gem_score,
@@ -2051,7 +2176,7 @@ def make_itemset(
     cfg: dict,
     decision: dict,
     title: str | None = None,
-    uid_key: str = "markov-kaisa-itemset",
+    uid_key: str | None = None,
     sortrank: int = 0,
 ) -> dict:
     def block(block_title: str, ids: list[str]) -> dict:
@@ -2062,6 +2187,8 @@ def make_itemset(
             "items": [{"id": item_id, "count": 1} for item_id in ids],
         }
 
+    champ_slug = cfg.get("champion", "kaisa")
+    actual_uid_key = uid_key or f"markov-{champ_slug}-itemset"
     buy_ids = [row["id"] for row in decision["buy_order"]]
     start_ids = [row["id"] for row in decision["start"]]
     situ_ids = [row["id"] for row in decision["situational"]]
@@ -2083,7 +2210,7 @@ def make_itemset(
         "mode": "any",
         "sortrank": sortrank,
         "startedFrom": "blank",
-        "uid": str(uuid.uuid5(uuid.NAMESPACE_URL, uid_key)),
+        "uid": str(uuid.uuid5(uuid.NAMESPACE_URL, actual_uid_key)),
         "associatedChampions": [cfg["champion_id"]],
         "associatedMaps": cfg["associated_maps"],
         "preferredItemSlots": [],
@@ -2293,14 +2420,15 @@ def print_summary(cfg: dict, decision: dict, dest: Path, index_path: Path) -> No
                 "    buy: "
                 + " -> ".join(row["name"] for row in gem.get("buy_order") or [])
             )
+    champ_name = cfg.get("champion_name") or cfg.get("champion", "Kai'Sa").title()
     print(f"\nChampion file:\n  {dest}")
     print(f"Client index:\n  {index_path}")
     if league_client_running():
         print("\nLeague is open. Close the client completely, then reopen it.")
         print("Otherwise the client may overwrite ItemSets.json on exit.")
     else:
-        print("\nOpen League and select Kai'Sa. The sets appear under Item Sets.")
-        print("Markov Kai'Sa is the U path. Gem Hunter sets are named by core winrate.")
+        print(f"\nOpen League and select {champ_name}. The sets appear under Item Sets.")
+        print(f"{cfg['build_title']} is the U path. Gem Hunter sets are named by core winrate.")
 
 
 LOLALYTICS_TIERS = (
@@ -2332,6 +2460,81 @@ def prior_for_tier(tier: str) -> tuple[str, str]:
     if name in {"diamond", "emerald_plus", "diamond_plus"}:
         return "master", "all"
     return "all", "all"
+
+
+def pick_champion_menu(default: str = "kaisa", out_path: Path | None = None) -> str | None:
+    """Interactive up/down champion picker for the Windows launcher."""
+    champions = ["kaisa", "tristana"]
+    normalized = normalize_champion(default)
+    try:
+        idx = champions.index(normalized)
+    except ValueError:
+        idx = 0
+
+    labels = {
+        "kaisa": "Kai'Sa  (default)",
+        "tristana": "Tristana",
+    }
+    coral_bg = "\033[48;2;232;90;60m"
+    ink = "\033[38;2;26;26;26m"
+    coral = "\033[38;2;232;90;60m"
+    dim = "\033[38;2;120;112;100m"
+    reset = "\033[0m"
+    header = "  Up / Down  =  move     Enter  =  pick     Esc  =  cancel"
+    menu_lines = 4 + len(champions)
+    stream = sys.stdout
+
+    def draw() -> None:
+        stream.write(f"\n{coral}  pick a champion brick{reset}\n")
+        stream.write(f"{dim}{header}{reset}\n\n")
+        for i, c in enumerate(champions):
+            name = f"{labels.get(c, c):<22}"
+            if i == idx:
+                stream.write(f"  {coral_bg}{ink}  #  {name}{reset}\n")
+            else:
+                stream.write(f"  {dim}  .  {name}{reset}\n")
+        stream.flush()
+
+    def commit(chosen: str | None) -> str | None:
+        if chosen and out_path is not None:
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            out_path.write_text(chosen + "\n", encoding="utf-8")
+        return chosen
+
+    if not sys.stdin.isatty():
+        print(normalized)
+        return commit(normalized)
+
+    try:
+        import msvcrt
+    except ImportError:
+        print(normalized)
+        return commit(normalized)
+
+    first = True
+    while True:
+        if not first:
+            stream.write(f"\033[{menu_lines}A")
+        first = False
+        draw()
+
+        key = msvcrt.getch()
+        if key in (b"\x00", b"\xe0"):
+            arrow = msvcrt.getch()
+            if arrow == b"H":
+                idx = (idx - 1) % len(champions)
+            elif arrow == b"P":
+                idx = (idx + 1) % len(champions)
+            continue
+        if key in (b"\r", b"\n"):
+            chosen = champions[idx]
+            stream.write(f"\n  {coral}#{reset}  selected  {labels.get(chosen, chosen)}\n")
+            stream.flush()
+            return commit(chosen)
+        if key == b"\x1b":
+            stream.write("\n  Cancelled.\n")
+            stream.flush()
+            return commit(None)
 
 
 def pick_tier_menu(default: str = "silver", out_path: Path | None = None) -> str | None:
@@ -2423,7 +2626,19 @@ def pick_tier_menu(default: str = "silver", out_path: Path | None = None) -> str
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Generate the Markov Kai'Sa item set.")
+    parser = argparse.ArgumentParser(description="Generate the Markov champion item set.")
+    parser.add_argument(
+        "--champion",
+        "--champ",
+        default=None,
+        help="Champion to build for (e.g. kaisa, tristana). Default is kaisa.",
+    )
+    parser.add_argument(
+        "--pick-champion",
+        "--pick-champ",
+        action="store_true",
+        help="Interactive up/down menu; writes the chosen champion for RUN.bat.",
+    )
     parser.add_argument(
         "--tier",
         choices=LOLALYTICS_TIERS,
@@ -2441,12 +2656,24 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     cfg = load_config()
     args = parse_args()
+    if args.pick_champion:
+        chosen = pick_champion_menu(
+            str(cfg.get("champion") or "kaisa"),
+            out_path=OUTPUT_DIR / "selected_champion.txt",
+        )
+        return 0 if chosen else 1
     if args.pick_tier:
         chosen = pick_tier_menu(
             str(cfg.get("tier") or "silver"),
             out_path=OUTPUT_DIR / "selected_rank.txt",
         )
         return 0 if chosen else 1
+    if args.champion:
+        cfg = apply_champion(cfg, args.champion)
+        print(f"Champion override from launcher: {cfg['champion_name']} ({cfg['champion']})")
+    else:
+        cfg = apply_champion(cfg)
+
     if args.tier:
         cfg["tier"] = args.tier
         print(f"Rank override from launcher: {args.tier}")
@@ -2457,6 +2684,7 @@ def main() -> int:
         decision, silver, p0, p_avg, alpha = build_decision(cfg, items)
         today = date.today().isoformat()
         selection = {
+            "champion": cfg["champion"],
             "item1": decision["item1"]["id"],
             "pair": decision["item2"]["path"],
             "core": decision["core"]["path"],
@@ -2473,7 +2701,7 @@ def main() -> int:
             "core": compact_score(decision["core"]),
         }
         history = load_history()
-        previous = previous_calendar_entry(history, today, cfg.get("tier"))
+        previous = previous_calendar_entry(history, today, cfg.get("tier"), champion=cfg["champion"])
         lam = float((decision.get("context") or {}).get("lambda") or cfg.get("lambda_risk", 0.55))
         validation = validate_against_previous(
             previous, silver, p0, p_avg, alpha, cfg, selection, lam
@@ -2484,6 +2712,7 @@ def main() -> int:
             + [
                 {
                     "date": today,
+                    "champion": cfg["champion"],
                     "tier": cfg["tier"],
                     "selection": selection,
                     "validation": validation,
@@ -2498,6 +2727,7 @@ def main() -> int:
             print(f"Blacklisted faded core until {bl['until']}: {bl['core']}")
         snapshot = {
             "date": today,
+            "champion": cfg["champion"],
             "generated_at": decision["generated_at"],
             "patch": cfg["patch"],
             "tier": cfg["tier"],
@@ -2515,13 +2745,14 @@ def main() -> int:
         write_json(OUTPUT_DIR / "validation.json", validation)
         write_json(OUTPUT_DIR / cfg["itemset_filename"], itemset)
         gem_itemsets: list[tuple[dict, str]] = []
+        champ_slug = cfg["champion"]
         for gem in decision.get("gems") or []:
             slot = int(gem.get("slot") or (len(gem_itemsets) + 1))
             gem_set = make_itemset(
                 cfg,
                 gem,
                 title=gem["set_title"],
-                uid_key=gem["set_uid_key"],
+                uid_key=f"markov-{champ_slug}-gem-{slot}",
                 sortrank=slot,
             )
             filename = f"RIOT_ItemSet_GemHunter_{slot}.json"
@@ -2533,7 +2764,7 @@ def main() -> int:
             _gem_dest, index_path = install_itemset(cfg, gem_set, filename=filename)
             print(f"Installed {gem_set['title']}")
         used_uids = {row[0]["uid"] for row in gem_itemsets}
-        stale_gem_uids = {gem_uid(slot) for slot in (1, 2)} - used_uids
+        stale_gem_uids = {gem_uid(slot, champ_slug) for slot in (1, 2)} - used_uids
         drop_itemsets(cfg, stale_gem_uids)
         print_summary(cfg, decision, dest, index_path)
         return 0
