@@ -1,4 +1,5 @@
 {
+  "version": "2.0.0",
   "build_title": "Markov Kai'Sa",
   "champion": "kaisa",
   "champion_id": 145,

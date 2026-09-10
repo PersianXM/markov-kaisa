@@ -6,6 +6,7 @@
 
 **Live Lolalytics in. A 7-slot item set out. Maximize $U$, not raw winrate.**
 
+[![version](https://img.shields.io/badge/version-2.0.0-E85A3C?style=flat-square&labelColor=1A1A1A)](https://github.com/PersianXM/markov-kaisa/releases)
 [![multi champion](https://img.shields.io/badge/champions-Kai'Sa%20·%20Tristana-E85A3C?style=flat-square&labelColor=1A1A1A)](RUN.bat)
 [![any rank](https://img.shields.io/badge/rank-any%20tier-E85A3C?style=flat-square&labelColor=1A1A1A)](RUN.bat)
 [![live patch](https://img.shields.io/badge/patch-live-1A1A1A?style=flat-square&labelColor=E85A3C)](https://lolalytics.com/lol/kaisa/build/)
@@ -369,17 +370,24 @@ set only when you want the underpicked path, not the conservative U path.
 ```text
 markov-kaisa/
 ├── RUN.bat                 launcher: champion + rank picker
-├── markov_kaisa.py         fetch, score, install (stdlib only)
+├── markov_kaisa.py         clean CLI entrypoint (backward-compatible)
 ├── config.json             paths, floors, hyper defaults
 ├── README.md
 ├── docs/assets/            block graphics for README
+├── markov/                 modular Python package
+│   ├── config.py           auto-detects League root & loads config
+│   ├── data/               DDragon & Lolalytics APIs + caching
+│   ├── engine/             Bayesian math, evolutions, aggregation, Gem Hunter
+│   ├── client/             ItemSet JSON builder & client index installer
+│   └── cli/                interactive menus & colored summary printer
+├── tests/                  automated test suite (unit tests)
 ├── history/
 │   ├── daily.jsonl         validation snapshots (gitignored)
 │   └── blacklist.json      faded core blacklist (gitignored)
 └── output/
-    ├── decision.json       full decision payload (gitignored)
+    ├── decision.json       full decision payload with evolutions & gold
     ├── validation.json     daily check results (gitignored)
-    ├── RIOT_ItemSet_*.json item set files (gitignored)
+    ├── RIOT_ItemSet_*.json item set files with component blocks (gitignored)
     ├── cache_items.json    DDragon item name cache
     ├── cache_champions.json DDragon champion cache
     ├── selected_champion.txt launcher state
@@ -398,7 +406,7 @@ markov-kaisa/
 └────────────┘  └────────────┘  └────────────┘  └────────────┘
 ```
 
-No extra pip packages for the generator. Stdlib only (`http.client`, `json`, `math`, `argparse`, `uuid`, `re`).
+No extra pip packages for the generator. Stdlib only (`http.client`, `json`, `math`, `argparse`, `uuid`, `re`, `winreg`, `unittest`).
 
 <p align="center"><sub>■ ■ ■    ■</sub></p>
 
@@ -415,6 +423,12 @@ No extra pip packages for the generator. Stdlib only (`http.client`, `json`, `ma
 [■] champion picker menu
 [■] early-patch sample floor scaling
 [■] core blacklist on consecutive fades
+[■] modular package architecture (markov/)
+[■] kai'sa evolution tracker & level breakpoints
+[■] early component curves & first-back spikes
+[■] adaptive situational branches (AD vs AP profile)
+[■] auto-detection of league of legends install path
+[■] automated unit test suite (tests/)
 [ ] support synergy branches
 [ ] true 7-slot likelihood if Lolalytics adds itemSet6
 [ ] more champions (Jinx, Vayne, …)
